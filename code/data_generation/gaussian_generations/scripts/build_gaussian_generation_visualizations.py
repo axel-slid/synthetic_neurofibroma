@@ -1,0 +1,582 @@
+#!/usr/bin/env python3
+"""Build closed-body Plotly visualizations for gaussian generation folders."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import shutil
+from dataclasses import dataclass
+from pathlib import Path
+
+import nbformat as nbf
+import numpy as np
+import plotly.graph_objects as go
+from PIL import Image
+from plyfile import PlyData, PlyElement
+
+Image.MAX_IMAGE_PIXELS = None
+
+DATA_ROOT = Path("/mnt/shared/dils/projects/synthetic_neurofibroma/data")
+SCAN_IDS = ("HSR0018-Body-070", "HSR0152-Body-090")
+_CENTER_CACHE: dict[str, np.ndarray] = {}
+
+
+@dataclass
+class GenerationFolder:
+    name: str
+    root: Path
+    metadata_dir: Path
+    obj_dir: Path | None
+    texture_dir: Path | None
+    suffix: str
+    mode: str
+
+
+def parse_face_token(token: str) -> tuple[int, int | None]:
+    parts = token.split("/")
+    vertex_idx = int(parts[0]) - 1
+    texture_idx = int(parts[1]) - 1 if len(parts) > 1 and parts[1] else None
+    return vertex_idx, texture_idx
+
+
+def rgb_strings(rgb: np.ndarray) -> list[str]:
+    rgb = np.clip(np.rint(rgb), 0, 255).astype(np.uint8)
+    return [f"rgb({int(r)},{int(g)},{int(b)})" for r, g, b in rgb]
+
+
+def read_colored_ply(path: Path) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    ply = PlyData.read(path)
+    vertex = ply["vertex"].data
+    face = ply["face"].data
+    xyz = np.column_stack([vertex["x"], vertex["y"], vertex["z"]]).astype(np.float32)
+    rgb = np.column_stack([vertex["red"], vertex["green"], vertex["blue"]]).astype(np.uint8)
+    faces = np.vstack(face["vertex_indices"]).astype(np.int32)
+    return xyz, faces, rgb
+
+
+def sampled_generation_center(scan_id: str, target_faces: int = 45_000) -> np.ndarray:
+    """Return the centering offset used by the original gaussian-cap generator."""
+    if scan_id in _CENTER_CACHE:
+        return _CENTER_CACHE[scan_id]
+
+    obj_path = DATA_ROOT / "hsr" / "scans" / scan_id / "scan" / f"{scan_id}.obj"
+    vertices = []
+    face_count = None
+    with obj_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            if " vertices, " in line and " faces" in line:
+                face_count = int(line.split(" vertices, ")[1].split(" faces")[0])
+            elif line.startswith("v "):
+                vertices.append(tuple(map(float, line.split()[1:4])))
+
+    if face_count is None:
+        with obj_path.open("r", encoding="utf-8", errors="ignore") as handle:
+            face_count = sum(1 for line in handle if line.startswith("f "))
+
+    vertices_arr = np.asarray(vertices, dtype=np.float32)
+    keep_face_numbers = set(np.linspace(0, face_count - 1, min(target_faces, face_count), dtype=np.int64))
+    remap = {}
+    sampled_vertices = []
+    seen_faces = 0
+    with obj_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            if not line.startswith("f "):
+                continue
+            if seen_faces in keep_face_numbers:
+                for token in line.split()[1:4]:
+                    vertex_idx, _ = parse_face_token(token)
+                    if vertex_idx not in remap:
+                        remap[vertex_idx] = len(sampled_vertices)
+                        sampled_vertices.append(vertices_arr[vertex_idx])
+            seen_faces += 1
+
+    center = np.asarray(sampled_vertices, dtype=np.float32).mean(axis=0)
+    _CENTER_CACHE[scan_id] = center
+    return center
+
+
+def sampled_generation_mesh(scan_id: str, target_faces: int = 45_000) -> tuple[np.ndarray, np.ndarray]:
+    obj_path = DATA_ROOT / "hsr" / "scans" / scan_id / "scan" / f"{scan_id}.obj"
+    vertices = []
+    face_count = None
+    with obj_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            if " vertices, " in line and " faces" in line:
+                face_count = int(line.split(" vertices, ")[1].split(" faces")[0])
+            elif line.startswith("v "):
+                vertices.append(tuple(map(float, line.split()[1:4])))
+    if face_count is None:
+        with obj_path.open("r", encoding="utf-8", errors="ignore") as handle:
+            face_count = sum(1 for line in handle if line.startswith("f "))
+
+    keep_face_numbers = set(np.linspace(0, face_count - 1, min(target_faces, face_count), dtype=np.int64))
+    vertices_arr = np.asarray(vertices, dtype=np.float32)
+    remap = {}
+    sampled_vertices = []
+    sampled_faces = []
+    seen_faces = 0
+    with obj_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            if not line.startswith("f "):
+                continue
+            if seen_faces in keep_face_numbers:
+                tri = []
+                for token in line.split()[1:4]:
+                    vertex_idx, _ = parse_face_token(token)
+                    if vertex_idx not in remap:
+                        remap[vertex_idx] = len(sampled_vertices)
+                        sampled_vertices.append(vertices_arr[vertex_idx])
+                    tri.append(remap[vertex_idx])
+                sampled_faces.append(tri)
+            seen_faces += 1
+
+    sampled_vertices = np.asarray(sampled_vertices, dtype=np.float32)
+    return sampled_vertices - sampled_vertices.mean(axis=0), np.asarray(sampled_faces, dtype=np.int32)
+
+
+def snap_boundary_vertices_to_skin(
+    lesion_vertices: np.ndarray,
+    anchor: np.ndarray,
+    tangent_u: np.ndarray,
+    tangent_v: np.ndarray,
+    skin_vertices: np.ndarray,
+    skin_faces: np.ndarray,
+    boundary_fraction: float = 0.98,
+) -> np.ndarray:
+    lesion_offsets = lesion_vertices - anchor
+    lesion_plane = np.column_stack([lesion_offsets @ tangent_u, lesion_offsets @ tangent_v])
+    lesion_radius = np.linalg.norm(lesion_plane, axis=1)
+    max_radius = float(lesion_radius.max())
+    if max_radius <= 0:
+        return lesion_vertices
+    boundary = np.flatnonzero(lesion_radius >= boundary_fraction * max_radius)
+    if len(boundary) == 0:
+        return lesion_vertices
+    skin_centroids = skin_vertices[skin_faces].mean(axis=1)
+    skin_offsets = skin_centroids - anchor
+    skin_plane = np.column_stack([skin_offsets @ tangent_u, skin_offsets @ tangent_v])
+    snapped = lesion_vertices.copy()
+    for start in range(0, len(boundary), 256):
+        selected = boundary[start : start + 256]
+        delta = lesion_plane[selected, None, :] - skin_plane[None, :, :]
+        nearest = np.argmin(np.sum(delta * delta, axis=2), axis=1)
+        snapped[selected] = skin_centroids[nearest]
+    return snapped
+
+
+def write_colored_ply(path: Path, xyz: np.ndarray, faces: np.ndarray, rgb: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    vertices = np.empty(
+        len(xyz),
+        dtype=[("x", "f4"), ("y", "f4"), ("z", "f4"), ("red", "u1"), ("green", "u1"), ("blue", "u1")],
+    )
+    vertices["x"] = xyz[:, 0]
+    vertices["y"] = xyz[:, 1]
+    vertices["z"] = xyz[:, 2]
+    vertices["red"] = rgb[:, 0]
+    vertices["green"] = rgb[:, 1]
+    vertices["blue"] = rgb[:, 2]
+    face_array = np.empty(len(faces), dtype=[("vertex_indices", "i4", (3,))])
+    face_array["vertex_indices"] = faces
+    PlyData([PlyElement.describe(vertices, "vertex"), PlyElement.describe(face_array, "face")], text=False).write(path)
+
+
+def build_bump_from_metadata(
+    metadata_path: Path,
+    skin_vertices: np.ndarray,
+    skin_faces: np.ndarray,
+    color: tuple[int, int, int] = (178, 96, 104),
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    meta = json.loads(metadata_path.read_text())
+    height = float(meta["height"])
+    support_radius = float(meta["support_radius"])
+    sigma = float(meta["sigma"])
+    anchor = np.asarray(meta["anchor"], dtype=np.float32)
+    normal = np.asarray(meta["normal"], dtype=np.float32)
+    tangent_u = np.asarray(meta["tangent_u"], dtype=np.float32)
+    tangent_v = np.asarray(meta["tangent_v"], dtype=np.float32)
+    normal /= np.linalg.norm(normal)
+    tangent_u /= np.linalg.norm(tangent_u)
+    tangent_v /= np.linalg.norm(tangent_v)
+
+    radial_segments = 28
+    angular_segments = 96
+    points = [anchor + height * normal]
+    for ring in range(1, radial_segments + 1):
+        rho = support_radius * ring / radial_segments
+        z = height * np.exp(-(rho * rho) / (2 * sigma * sigma))
+        for step in range(angular_segments):
+            theta = 2 * np.pi * step / angular_segments
+            points.append(anchor + rho * np.cos(theta) * tangent_u + rho * np.sin(theta) * tangent_v + z * normal)
+
+    faces = []
+    for step in range(angular_segments):
+        faces.append([0, 1 + step, 1 + ((step + 1) % angular_segments)])
+    for ring in range(1, radial_segments):
+        prev_start = 1 + (ring - 1) * angular_segments
+        next_start = 1 + ring * angular_segments
+        for step in range(angular_segments):
+            a = prev_start + step
+            b = prev_start + ((step + 1) % angular_segments)
+            c = next_start + step
+            d = next_start + ((step + 1) % angular_segments)
+            faces.append([a, c, b])
+            faces.append([b, c, d])
+
+    # Close the cap with a base disk at the body contact plane. The disk sits on the
+    # closed body and prevents the bump mesh itself from having an open rim.
+    center_idx = len(points)
+    points.append(anchor)
+    base_start = 1 + (radial_segments - 1) * angular_segments
+    for step in range(angular_segments):
+        a = base_start + step
+        b = base_start + ((step + 1) % angular_segments)
+        faces.append([center_idx, b, a])
+
+    xyz = np.asarray(points, dtype=np.float32)
+    xyz = snap_boundary_vertices_to_skin(xyz, anchor, tangent_u, tangent_v, skin_vertices, skin_faces)
+    face_arr = np.asarray(faces, dtype=np.int32)
+    rgb = np.tile(np.asarray(color, dtype=np.uint8), (len(xyz), 1))
+    return xyz, face_arr, rgb
+
+
+def read_obj_cap(obj_path: Path, texture_path: Path | None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    vertices: list[list[float]] = []
+    colors: list[list[int] | None] = []
+    texcoords: list[tuple[float, float]] = []
+    raw_faces: list[list[tuple[int, int | None]]] = []
+    with obj_path.open("r", encoding="utf-8", errors="ignore") as handle:
+        for line in handle:
+            if line.startswith("v "):
+                parts = line.split()
+                vertices.append([float(parts[1]), float(parts[2]), float(parts[3])])
+                if len(parts) >= 7:
+                    colors.append([int(round(float(parts[4]) * 255)), int(round(float(parts[5]) * 255)), int(round(float(parts[6]) * 255))])
+                else:
+                    colors.append(None)
+            elif line.startswith("vt "):
+                parts = line.split()
+                texcoords.append((float(parts[1]), float(parts[2])))
+            elif line.startswith("f "):
+                raw_faces.append([parse_face_token(token) for token in line.split()[1:4]])
+
+    vertices_arr = np.asarray(vertices, dtype=np.float32)
+    texcoords_arr = np.asarray(texcoords, dtype=np.float32)
+    texture = None
+    if texture_path is not None and texture_path.exists():
+        image = Image.open(texture_path).convert("RGB")
+        texture = np.asarray(image, dtype=np.uint8)
+
+    remap: dict[tuple[int, int | None], int] = {}
+    out_vertices: list[np.ndarray] = []
+    out_rgb: list[list[int]] = []
+    out_faces: list[list[int]] = []
+    for face in raw_faces:
+        tri = []
+        for vertex_idx, texture_idx in face:
+            key = (vertex_idx, texture_idx)
+            if key not in remap:
+                remap[key] = len(out_vertices)
+                out_vertices.append(vertices_arr[vertex_idx])
+                if texture is not None and texture_idx is not None and 0 <= texture_idx < len(texcoords_arr):
+                    u, v = texcoords_arr[texture_idx]
+                    h, w = texture.shape[:2]
+                    px = int(np.clip(round(u * (w - 1)), 0, w - 1))
+                    py = int(np.clip(round((1.0 - v) * (h - 1)), 0, h - 1))
+                    out_rgb.append(texture[py, px].astype(int).tolist())
+                elif colors[vertex_idx] is not None:
+                    out_rgb.append(colors[vertex_idx])
+                else:
+                    out_rgb.append([178, 96, 104])
+            tri.append(remap[key])
+        out_faces.append(tri)
+
+    xyz = np.asarray(out_vertices, dtype=np.float32)
+    faces = np.asarray(out_faces, dtype=np.int32)
+    rgb = np.asarray(out_rgb, dtype=np.uint8)
+    return xyz, faces, rgb
+
+
+def close_open_cap_mesh(xyz: np.ndarray, faces: np.ndarray, rgb: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    edges = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    edges.sort(axis=1)
+    unique_edges, counts = np.unique(edges, axis=0, return_counts=True)
+    boundary_edges = unique_edges[counts == 1]
+    if len(boundary_edges) < 3:
+        return xyz, faces, rgb
+
+    boundary = np.unique(boundary_edges.ravel())
+    center = xyz[boundary].mean(axis=0, keepdims=True)
+    centered = xyz[boundary] - center
+    _, _, vh = np.linalg.svd(centered, full_matrices=False)
+    axis_u, axis_v = vh[0], vh[1]
+    coords = np.column_stack([centered @ axis_u, centered @ axis_v])
+    angles = np.arctan2(coords[:, 1], coords[:, 0])
+    ring = boundary[np.argsort(angles)]
+
+    center_idx = len(xyz)
+    xyz = np.vstack([xyz, center])
+    rgb = np.vstack([rgb, np.median(rgb[boundary], axis=0, keepdims=True).astype(np.uint8)])
+    disk_faces = [[center_idx, int(ring[(idx + 1) % len(ring)]), int(ring[idx])] for idx in range(len(ring))]
+    faces = np.vstack([faces, np.asarray(disk_faces, dtype=np.int32)])
+    return xyz, faces, rgb
+
+
+def normalize_for_plot(xyz: np.ndarray) -> np.ndarray:
+    out = xyz.astype(np.float32).copy()
+    out -= out.mean(axis=0)
+    scale = np.max(np.ptp(out, axis=0))
+    if scale > 0:
+        out /= scale
+    return out
+
+
+def make_plotly_figure(ply_path: Path, title: str) -> go.Figure:
+    xyz, faces, rgb = read_colored_ply(ply_path)
+    xyz = normalize_for_plot(xyz)
+    colors = rgb_strings(rgb)
+    fig = go.Figure(
+        data=[
+            go.Mesh3d(
+                x=xyz[:, 0],
+                y=xyz[:, 1],
+                z=xyz[:, 2],
+                i=faces[:, 0],
+                j=faces[:, 1],
+                k=faces[:, 2],
+                vertexcolor=colors,
+                flatshading=False,
+                lighting=dict(ambient=0.95, diffuse=0.55, specular=0.04, roughness=0.9),
+                hoverinfo="skip",
+            )
+        ]
+    )
+    fig.update_layout(
+        title=title,
+        scene=dict(
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            zaxis=dict(visible=False),
+            bgcolor="rgb(242,244,247)",
+            aspectmode="data",
+            camera=dict(eye=dict(x=0.0, y=2.15, z=0.45), center=dict(x=0, y=0, z=0.04)),
+        ),
+        width=1000,
+        height=780,
+        margin=dict(l=0, r=0, t=44, b=0),
+        paper_bgcolor="white",
+        showlegend=False,
+    )
+    return fig
+
+
+def folder_configs() -> list[GenerationFolder]:
+    return [
+        GenerationFolder(
+            name="gaussian_generations",
+            root=DATA_ROOT / "synthetic" / "gaussian_generations",
+            metadata_dir=DATA_ROOT / "synthetic" / "gaussian_generations" / "metadata",
+            obj_dir=None,
+            texture_dir=None,
+            suffix="",
+            mode="metadata",
+        ),
+        GenerationFolder(
+            name="gaussian_generations_textured_diffusion",
+            root=DATA_ROOT / "synthetic" / "gaussian_generations_textured_diffusion",
+            metadata_dir=DATA_ROOT / "synthetic" / "gaussian_generations_textured_diffusion" / "data" / "metadata",
+            obj_dir=DATA_ROOT / "synthetic" / "gaussian_generations_textured_diffusion" / "data" / "objs",
+            texture_dir=DATA_ROOT / "synthetic" / "gaussian_generations_textured_diffusion" / "data" / "textures",
+            suffix="_textured_diffusion",
+            mode="obj_texture",
+        ),
+        GenerationFolder(
+            name="gaussian_generations_textured_interpolation",
+            root=DATA_ROOT / "synthetic" / "gaussian_generations_textured_interpolation",
+            metadata_dir=DATA_ROOT / "synthetic" / "gaussian_generations_textured_interpolation",
+            obj_dir=DATA_ROOT / "synthetic" / "gaussian_generations_textured_interpolation" / "objs",
+            texture_dir=None,
+            suffix="_textured_interpolation",
+            mode="obj_vertex_color",
+        ),
+    ]
+
+
+def metadata_to_stem(metadata_path: Path, suffix: str) -> str:
+    stem = metadata_path.stem
+    if suffix and stem.endswith(suffix):
+        stem = stem[: -len(suffix)]
+    return stem
+
+
+def generation_items(folder: GenerationFolder) -> list[dict[str, object]]:
+    if folder.name == "gaussian_generations_textured_interpolation":
+        manifest_path = folder.root / "manifest.csv"
+        rows = []
+        with manifest_path.open(newline="") as handle:
+            for row in csv.DictReader(handle):
+                obj_path = DATA_ROOT / row["obj"]
+                rows.append(
+                    {
+                        "stem_base": obj_path.stem.removesuffix(folder.suffix),
+                        "out_stem": obj_path.stem,
+                        "scan_id": row["scan_id"],
+                        "metadata_path": DATA_ROOT / row["source_metadata"],
+                    }
+                )
+        return rows
+
+    items = []
+    for metadata_path in sorted(folder.metadata_dir.glob("*.json")):
+        metadata = json.loads(metadata_path.read_text())
+        stem_base = metadata_to_stem(metadata_path, folder.suffix)
+        out_stem = metadata_path.stem if folder.suffix else stem_base
+        items.append(
+            {
+                "stem_base": stem_base,
+                "out_stem": out_stem,
+                "scan_id": metadata["scan_id"],
+                "metadata_path": metadata_path,
+            }
+        )
+    return items
+
+
+def clear_old_visualizations(folder: GenerationFolder) -> tuple[Path, Path, Path]:
+    vis_root = folder.root / "visualizations"
+    if vis_root.exists():
+        shutil.rmtree(vis_root)
+    mesh_root = vis_root / "meshes"
+    preview_root = vis_root / "previews"
+    notebook_root = vis_root / "plotly"
+    mesh_root.mkdir(parents=True, exist_ok=True)
+    preview_root.mkdir(parents=True, exist_ok=True)
+    notebook_root.mkdir(parents=True, exist_ok=True)
+    return mesh_root, preview_root, notebook_root
+
+
+def build_folder(folder: GenerationFolder) -> None:
+    mesh_root, preview_root, notebook_root = clear_old_visualizations(folder)
+    records = []
+    base_mesh_root = DATA_ROOT / "hsr" / "visualizations" / "meshes"
+    for item in generation_items(folder):
+        stem_base = str(item["stem_base"])
+        out_stem = str(item["out_stem"])
+        scan_id = str(item["scan_id"])
+        metadata_path = Path(item["metadata_path"])
+        base_xyz, base_faces, base_rgb = read_colored_ply(base_mesh_root / f"{scan_id}_closed_textured_mesh.ply")
+        skin_vertices, skin_faces = sampled_generation_mesh(scan_id)
+
+        if folder.mode == "metadata":
+            bump_xyz, bump_faces, bump_rgb = build_bump_from_metadata(metadata_path, skin_vertices, skin_faces)
+        else:
+            obj_path = folder.obj_dir / f"{out_stem}.obj"
+            texture_path = folder.texture_dir / f"{out_stem}.png" if folder.texture_dir is not None else None
+            bump_xyz, bump_faces, bump_rgb = read_obj_cap(obj_path, texture_path)
+            bump_xyz, bump_faces, bump_rgb = close_open_cap_mesh(bump_xyz, bump_faces, bump_rgb)
+
+        bump_xyz = bump_xyz + sampled_generation_center(scan_id)
+        bump_faces_offset = bump_faces + len(base_xyz)
+        combined_xyz = np.vstack([base_xyz, bump_xyz])
+        combined_faces = np.vstack([base_faces, bump_faces_offset])
+        combined_rgb = np.vstack([base_rgb, bump_rgb])
+        out_ply = mesh_root / f"{out_stem}_closed_textured_visualization.ply"
+        write_colored_ply(out_ply, combined_xyz, combined_faces, combined_rgb)
+
+        preview_path = preview_root / f"{out_stem}_closed_plotly_preview.png"
+        make_plotly_figure(out_ply, out_stem).write_image(preview_path, scale=1)
+        records.append(
+            {
+                "stem": out_stem,
+                "scan_id": scan_id,
+                "mesh": str(out_ply.relative_to(folder.root)),
+                "preview": str(preview_path.relative_to(folder.root)),
+            }
+        )
+        print(folder.name, out_stem, out_ply.name)
+
+    manifest_path = folder.root / "visualizations" / "manifest.json"
+    manifest_path.write_text(json.dumps(records, indent=2))
+    write_notebook(folder, notebook_root, records)
+
+
+def write_notebook(folder: GenerationFolder, notebook_root: Path, records: list[dict[str, str]]) -> None:
+    records_json = json.dumps(records, indent=2)
+    selected_records = []
+    for scan_id in SCAN_IDS:
+        selected_records.extend([record for record in records if record["scan_id"] == scan_id][:5])
+    selected_json = json.dumps(selected_records, indent=2)
+    setup_code = f"""
+from pathlib import Path
+import numpy as np
+import plotly.graph_objects as go
+from plyfile import PlyData
+
+ROOT = Path('/mnt/shared/dils/projects/synthetic_neurofibroma/data/synthetic/{folder.name}')
+RECORDS = {records_json}
+SELECTED_RECORDS = {selected_json}
+
+def _load_colored_ply(path):
+    ply = PlyData.read(path)
+    v = ply['vertex'].data
+    f = ply['face'].data
+    xyz = np.column_stack([v['x'], v['y'], v['z']]).astype(np.float32)
+    xyz -= xyz.mean(axis=0)
+    scale = np.max(np.ptp(xyz, axis=0))
+    if scale > 0:
+        xyz /= scale
+    faces = np.vstack(f['vertex_indices']).astype(np.int32)
+    colors = [f"rgb({{int(r)}},{{int(g)}},{{int(b)}})" for r, g, b in zip(v['red'], v['green'], v['blue'])]
+    return xyz, faces, colors
+
+def make_figure(record):
+    xyz, faces, colors = _load_colored_ply(ROOT / record['mesh'])
+    fig = go.Figure(data=[go.Mesh3d(
+        x=xyz[:, 0], y=xyz[:, 1], z=xyz[:, 2],
+        i=faces[:, 0], j=faces[:, 1], k=faces[:, 2],
+        vertexcolor=colors,
+        flatshading=False,
+        lighting=dict(ambient=0.95, diffuse=0.55, specular=0.04, roughness=0.9),
+        hoverinfo='skip',
+    )])
+    fig.update_layout(
+        title=record['stem'],
+        scene=dict(
+            xaxis=dict(visible=False), yaxis=dict(visible=False), zaxis=dict(visible=False),
+            bgcolor='rgb(242,244,247)', aspectmode='data',
+            camera=dict(eye=dict(x=0.0, y=2.15, z=0.45), center=dict(x=0, y=0, z=0.04)),
+        ),
+        width=1000, height=780,
+        margin=dict(l=0, r=0, t=44, b=0),
+        paper_bgcolor='white',
+        showlegend=False,
+    )
+    return fig
+"""
+    cells = [
+        nbf.v4.new_markdown_cell(f"# {folder.name} closed textured Plotly viewer"),
+        nbf.v4.new_markdown_cell("This notebook shows ten closed-body Plotly visualizations: five from `HSR0018-Body-070` and five from `HSR0152-Body-090`."),
+        nbf.v4.new_code_cell(setup_code),
+    ]
+    for idx, record in enumerate(selected_records):
+        cells.append(nbf.v4.new_markdown_cell(f"## {idx + 1}. {record['stem']}"))
+        cells.append(nbf.v4.new_code_cell(f"make_figure(SELECTED_RECORDS[{idx}])"))
+    nb = nbf.v4.new_notebook(cells=cells)
+    notebook_path = notebook_root / f"{folder.name}_closed_plotly_viewer.ipynb"
+    nbf.write(nb, notebook_path)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--folder", choices=[cfg.name for cfg in folder_configs()], action="append")
+    args = parser.parse_args()
+    selected = set(args.folder or [cfg.name for cfg in folder_configs()])
+    for folder in folder_configs():
+        if folder.name in selected:
+            build_folder(folder)
+
+
+if __name__ == "__main__":
+    main()

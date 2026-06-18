@@ -1,0 +1,1 @@
+- When I ask you to make a new data folder you should put the data in a subfolder and visualizations in another subfolder. The visualizations should NOT contain html files rather they should contain gif visualizations and .ipynb files that have been fully generated and have plotly plots to move 3D data interactively.

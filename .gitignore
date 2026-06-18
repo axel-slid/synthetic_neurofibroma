@@ -1,0 +1,52 @@
+# Python/cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.ipynb_checkpoints/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Environments
+.env
+.venv/
+venv/
+env/
+
+# Large/generated project data. Keep local; do not commit to normal GitHub.
+data/**
+!data/README.md
+
+# Large Depth Pro notebook/Plotly assets. Keep local; do not commit without LFS.
+code/depth_pro/visualizations/**
+!code/depth_pro/visualizations/README.md
+
+# Third-party repositories/code drops. Track only the policy README here.
+code/external/**
+!code/external/README.md
+
+# Generated model/checkpoint/artifact formats
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+*.onnx
+*.npy
+*.npz
+*.ply
+*.obj
+*.mtl
+*.glb
+*.gif
+*.mp4
+*.mov
+
+# Generated reports and notebook-rendered HTML/PDF
+*.html
+*.pdf
