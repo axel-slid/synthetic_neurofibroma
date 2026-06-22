@@ -10,23 +10,35 @@ normal Git commits.
 
 ## Preview
 
-HSR textured scan turntables:
+Body-part segmentation rotations:
 
-![HSR0018 textured scan turntable](docs/assets/hsr0018_textured_camera.gif)
+![HSR body-part segmentation overlay rotation](docs/assets/hsr_body_part_segmentation_overlay_combined.gif)
 
-![HSR0152 textured scan turntable](docs/assets/hsr0152_textured_camera.gif)
+![Manual body-part segmentation rotation](docs/assets/manual_body_part_segmentation_two_people_rotating.gif)
 
-Back gaussian-interpolation RGB/depth montage:
+Depth-map montage for back gaussian-interpolation lesions:
 
 ![Back gaussian interpolation RGB and depth montage](docs/assets/back_gaussian_interpolation_rgb_depth_montage.png)
 
-Synthetic RGB/depth review montage:
+## Work Summary
 
-![Synthetic lesion RGB and depth montage](docs/assets/front_all_rgb_depth_pairs_montage.gif)
+This project builds synthetic neurofibroma examples on top of HSR body scans,
+renders RGB/depth supervision from those examples, and prepares visualization
+assets for reviewing lesion placement, body-part coverage, and depth quality.
 
-Literature map preview:
+The current codebase includes HSR preprocessing, body-part segmentation assets,
+single- and multiple-lesion generation, physics-augmented lesion scripts,
+ground-truth depth-map generation, Depth Pro prediction/fine-tuning utilities,
+and literature/research planning materials.
 
-![Interactive neurofibroma literature map rotation](literature/visualizations/literature_map_rotation.gif)
+## Workflow
+
+1. Prepare local HSR scan assets under `data/hsr/`.
+2. Build or import body-part segmentations for each scan.
+3. Generate synthetic lesions by body part and method under `data/synthetic/`.
+4. Render RGB images, depth maps, lesion volumes, manifests, and review montages.
+5. Use the generated RGB/depth pairs for Depth Pro prediction and fine-tuning experiments.
+6. Review outputs with GIFs, executed Plotly notebooks, and dataset summaries.
 
 ## Research Plan
 
@@ -78,32 +90,6 @@ synthetic_neurofibroma/
     README.md               Dataset layout contract
   AGENTS.md                 Project-specific agent/data-folder rules
 ```
-
-## Naming Conventions
-
-Use lowercase snake case for project-owned code and data folders:
-
-```text
-code/depth_maps/
-code/data_generation/sphere_generations/
-data/synthetic/single_lesion/body_parts/back/spheres_diffusion/
-```
-
-Use this convention for external GitHub repositories or other people’s code:
-
-```text
-code/external/<repo_owner>__<repo_name>/
-```
-
-Examples:
-
-```text
-code/external/apple__ml-depth-pro/
-code/external/DepthAnything__Depth-Anything-V2/
-code/external/facebookresearch__sam2/
-```
-
-If the code is not from a clean GitHub owner/repo source, use a clear folder name under `code/external/`, and add a README inside that folder describing where it came from.
 
 ## Current Main Components
 
