@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 from pathlib import Path
 
@@ -14,9 +15,11 @@ from matplotlib import colormaps
 import numpy as np
 import pyrender
 import trimesh
+from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parents[4]
 DEFAULT_NPZ = ROOT / "data" / "synthetic" / "multiple_lesion_physics" / "data" / "lesion_frame_vertices.npz"
+DEFAULT_METRICS = ROOT / "data" / "synthetic" / "multiple_lesion_physics" / "data" / "frame_metrics.csv"
 DEFAULT_OUTPUT = ROOT / "docs" / "assets" / "multiple_lesion_physics_growth_progression.gif"
 
 
@@ -66,7 +69,53 @@ def depth_to_rainbow(depth: np.ndarray, depth_min: float, depth_max: float) -> n
     return depth_rgb
 
 
-def render_fixed_camera_growth_gif(npz_path: Path, output_path: Path, gif_frames: int, fps: int) -> None:
+def total_final_volume_ml(lesion_vertices: np.ndarray, lesion_faces: np.ndarray) -> float:
+    total_volume_m3 = 0.0
+    for vertices in lesion_vertices[:, -1]:
+        mesh = trimesh.Trimesh(vertices=vertices, faces=lesion_faces, process=False)
+        total_volume_m3 += abs(float(mesh.volume))
+    return total_volume_m3 * 1_000_000.0
+
+
+def frame_growth_fractions(metrics_path: Path) -> dict[int, float]:
+    growth_by_frame: dict[int, float] = {}
+    with metrics_path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            frame_index = int(row["frame_index"])
+            growth_by_frame[frame_index] = growth_by_frame.get(frame_index, 0.0) + float(row["growth"])
+    max_growth = max(growth_by_frame.values())
+    return {frame_index: growth / max_growth for frame_index, growth in growth_by_frame.items()}
+
+
+def add_volume_label(frame: np.ndarray, volume_ml: float) -> np.ndarray:
+    image = Image.fromarray(frame)
+    draw = ImageDraw.Draw(image)
+    try:
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", 22)
+    except OSError:
+        font = ImageFont.load_default()
+    text = f"Total lesion volume: {volume_ml:,.0f} mL"
+    padding_x = 14
+    padding_y = 9
+    text_bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = text_bbox[2] - text_bbox[0]
+    text_h = text_bbox[3] - text_bbox[1]
+    x1 = image.width - text_w - padding_x * 2 - 16
+    y1 = 14
+    x2 = image.width - 16
+    y2 = y1 + text_h + padding_y * 2
+    draw.rounded_rectangle((x1, y1, x2, y2), radius=5, fill=(255, 255, 255), outline=(35, 35, 35))
+    draw.text((x1 + padding_x, y1 + padding_y), text, fill=(20, 20, 20), font=font)
+    return np.asarray(image)
+
+
+def render_fixed_camera_growth_gif(
+    npz_path: Path,
+    metrics_path: Path,
+    output_path: Path,
+    gif_frames: int,
+    fps: int,
+) -> None:
     payload = np.load(npz_path)
     body_vertices = payload["body_plot_vertices"].astype(np.float32)
     body_faces = payload["body_plot_faces"].astype(np.int32)
@@ -74,6 +123,8 @@ def render_fixed_camera_growth_gif(npz_path: Path, output_path: Path, gif_frames
     lesion_vertices = payload["lesion_vertices"].astype(np.float32)
     lesion_faces = payload["lesion_faces"].astype(np.int32)
     lesion_colors = payload["lesion_colors"].astype(np.uint8)
+    final_volume_ml = total_final_volume_ml(lesion_vertices, lesion_faces)
+    growth_fractions = frame_growth_fractions(metrics_path)
 
     body_mesh = trimesh.Trimesh(
         vertices=body_vertices,
@@ -113,8 +164,11 @@ def render_fixed_camera_growth_gif(npz_path: Path, output_path: Path, gif_frames
     depth_max = float(np.percentile(valid_depths, 99.0))
     gap = np.full((color_frames[0].shape[0], 8, 3), 244, dtype=np.uint8)
     frames = [
-        np.concatenate([color, gap, depth_to_rainbow(depth, depth_min, depth_max)], axis=1)
-        for color, depth in zip(color_frames, depth_frames)
+        add_volume_label(
+            np.concatenate([color, gap, depth_to_rainbow(depth, depth_min, depth_max)], axis=1),
+            final_volume_ml * growth_fractions[int(frame_index)],
+        )
+        for frame_index, color, depth in zip(sample_indices, color_frames, depth_frames)
     ]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -124,11 +178,12 @@ def render_fixed_camera_growth_gif(npz_path: Path, output_path: Path, gif_frames
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--npz", type=Path, default=DEFAULT_NPZ)
+    parser.add_argument("--metrics", type=Path, default=DEFAULT_METRICS)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--gif-frames", type=int, default=24)
     parser.add_argument("--fps", type=int, default=8)
     args = parser.parse_args()
-    render_fixed_camera_growth_gif(args.npz, args.output, args.gif_frames, args.fps)
+    render_fixed_camera_growth_gif(args.npz, args.metrics, args.output, args.gif_frames, args.fps)
     print(f"Wrote {args.output.relative_to(ROOT)}")
 
 
