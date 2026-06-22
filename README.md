@@ -18,6 +18,10 @@ Physics growth simulation:
 
 ![Multiple-lesion physics growth progression](docs/assets/multiple_lesion_physics_growth_progression.gif)
 
+Fitzpatrick image and Depth Pro 3D surface:
+
+![Fitzpatrick original image and rotating Depth Pro 3D surface](docs/assets/fitzpatrick_depthpro_surface_rotation.gif)
+
 Depth-map montage for back gaussian-interpolation lesions:
 
 ![Back gaussian interpolation RGB and depth montage](docs/assets/back_gaussian_interpolation_rgb_depth_montage.png)

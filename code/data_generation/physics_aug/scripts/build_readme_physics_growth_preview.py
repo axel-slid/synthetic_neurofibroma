@@ -34,7 +34,11 @@ from build_multiple_lesion_physics_dataset import (  # noqa: E402
 )
 
 ROOT = Path(__file__).resolve().parents[4]
-DEFAULT_BODY_PART_ROOT = ROOT / "data" / "synthetic" / "multiple_lesion_physics" / "body_parts"
+BODY_PART_ROOT_CANDIDATES = (
+    ROOT / "data" / "synthetic" / "multiple_lesion_physics" / "body_parts",
+    ROOT / "data" / "synthetic" / "multiple_lesion_physics_simple" / "body_parts",
+)
+DEFAULT_BODY_PART_ROOT = next((path for path in BODY_PART_ROOT_CANDIDATES if path.exists()), BODY_PART_ROOT_CANDIDATES[0])
 DEFAULT_OUTPUT = ROOT / "docs" / "assets" / "multiple_lesion_physics_growth_progression.gif"
 DEFAULT_BODY_PARTS = ("back", "face", "front")
 PANEL_WIDTH = 430
@@ -102,16 +106,10 @@ def font(size: int) -> ImageFont.ImageFont:
         return ImageFont.load_default()
 
 
-def add_view_label(frame: np.ndarray, label: str, volume_ml: float) -> np.ndarray:
+def add_view_label(frame: np.ndarray, label: str) -> np.ndarray:
     image = Image.fromarray(frame)
     draw = ImageDraw.Draw(image)
-    label_font = font(13)
-    volume_font = font(12)
-    volume_text = f"Volume: {volume_ml:,.0f} mL"
-    volume_bbox = draw.textbbox((0, 0), volume_text, font=volume_font)
-    volume_w = volume_bbox[2] - volume_bbox[0]
-    draw.text((10, 8), label, fill=(20, 20, 20), font=label_font)
-    draw.text((PANEL_WIDTH - volume_w - 10, 9), volume_text, fill=(20, 20, 20), font=volume_font)
+    draw.text((10, 8), label, fill=(20, 20, 20), font=font(13))
     return np.asarray(image)
 
 
@@ -176,14 +174,14 @@ def lesion_vertices_for_frame(
     spec: LesionSpec,
     frame_index: int,
     frame_count: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     anchor = np.asarray(lesion["anchor_xyz"], dtype=np.float32)
     normal = normalized(np.asarray(lesion["normal_xyz"], dtype=np.float32))
     tangent_u = normalized(np.asarray(lesion["tangent_u_xyz"], dtype=np.float32))
     tangent_v = normalized(np.asarray(lesion["tangent_v_xyz"], dtype=np.float32))
     gravity_world = np.array([0.0, 0.0, -1.0], dtype=np.float32)
     gravity_direction_2d = np.array([float(gravity_world @ tangent_u), float(gravity_world @ tangent_v)], dtype=np.float32)
-    local_xyz, faces, _radial_weight, state = build_local_shape(
+    local_xyz, faces, _radial_weight, _state = build_local_shape(
         spec,
         frame_index,
         frame_count,
@@ -196,7 +194,7 @@ def lesion_vertices_for_frame(
     vertices = anchor + local_points[:, 0, None] * tangent_u + local_points[:, 1, None] * tangent_v
     vertices = vertices + heights[:, None] * normal
     colors = np.tile(np.asarray(spec.color_rgb, dtype=np.uint8), (len(vertices), 1))
-    return vertices.astype(np.float32), faces.astype(np.int32), colors, state
+    return vertices.astype(np.float32), faces.astype(np.int32), colors
 
 
 def load_simulation(body_part_root: Path, body_part: str) -> BodyPartSimulation:
@@ -216,25 +214,23 @@ def load_simulation(body_part_root: Path, body_part: str) -> BodyPartSimulation:
     )
 
 
-def combine_lesion_frame(simulation: BodyPartSimulation, frame_index: int) -> tuple[trimesh.Trimesh, float, np.ndarray]:
+def combine_lesion_frame(simulation: BodyPartSimulation, frame_index: int) -> tuple[trimesh.Trimesh, np.ndarray]:
     vertex_parts: list[np.ndarray] = []
     face_parts: list[np.ndarray] = []
     color_parts: list[np.ndarray] = []
     vertex_offset = 0
-    total_volume_ml = 0.0
     for lesion, spec in zip(simulation.lesions, simulation.specs):
-        vertices, faces, colors, state = lesion_vertices_for_frame(lesion, spec, frame_index, simulation.frame_count)
+        vertices, faces, colors = lesion_vertices_for_frame(lesion, spec, frame_index, simulation.frame_count)
         vertex_parts.append(vertices)
         face_parts.append(faces + vertex_offset)
         color_parts.append(colors)
         vertex_offset += len(vertices)
-        total_volume_ml += float(lesion["spherical_cap_volume_ml"]) * float(state["growth"])
 
     vertices = np.vstack(vertex_parts).astype(np.float32)
     faces = np.vstack(face_parts).astype(np.int32)
     colors = np.vstack(color_parts).astype(np.uint8)
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, vertex_colors=rgba(colors), process=False)
-    return mesh, total_volume_ml, vertices
+    return mesh, vertices
 
 
 def body_mesh(simulation: BodyPartSimulation) -> trimesh.Trimesh:
@@ -289,18 +285,17 @@ def render_body_part_stack_gif(
     }
     rendered_rows: dict[str, list[np.ndarray]] = {simulation.body_part: [] for simulation in simulations}
     rendered_depths: dict[str, list[np.ndarray]] = {simulation.body_part: [] for simulation in simulations}
-    rendered_volumes: dict[str, list[float]] = {simulation.body_part: [] for simulation in simulations}
 
     renderer = pyrender.OffscreenRenderer(viewport_width=PANEL_WIDTH, viewport_height=PANEL_HEIGHT)
     try:
         for simulation in simulations:
             render_body = pyrender.Mesh.from_trimesh(body_mesh(simulation), smooth=True)
-            _final_mesh, _final_volume, final_vertices = combine_lesion_frame(simulation, simulation.frame_count - 1)
+            _final_mesh, final_vertices = combine_lesion_frame(simulation, simulation.frame_count - 1)
             eye, target, yfov_deg = camera_for_body_part(simulation.body_part, simulation.body_vertices, final_vertices)
             camera_pose = look_at_camera_to_world(eye, target, np.array([0.0, 0.0, 1.0], dtype=np.float64))
 
             for frame_index in sample_indices[simulation.body_part]:
-                lesion_mesh, total_volume_ml, _vertices = combine_lesion_frame(simulation, int(frame_index))
+                lesion_mesh, _vertices = combine_lesion_frame(simulation, int(frame_index))
                 scene = pyrender.Scene(bg_color=[244, 246, 249, 255], ambient_light=[0.78, 0.78, 0.78])
                 scene.add(render_body)
                 scene.add(pyrender.Mesh.from_trimesh(lesion_mesh, smooth=True))
@@ -309,7 +304,6 @@ def render_body_part_stack_gif(
                 color, depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
                 rendered_rows[simulation.body_part].append(color[:, :, :3])
                 rendered_depths[simulation.body_part].append(depth)
-                rendered_volumes[simulation.body_part].append(total_volume_ml)
     finally:
         renderer.delete()
 
@@ -331,12 +325,7 @@ def render_body_part_stack_gif(
         rows = []
         for body_part in body_parts:
             depth_min, depth_max = depth_ranges[body_part]
-            volume_ml = rendered_volumes[body_part][sample_offset]
-            color = add_view_label(
-                rendered_rows[body_part][sample_offset],
-                labels.get(body_part, body_part.title()),
-                volume_ml,
-            )
+            color = add_view_label(rendered_rows[body_part][sample_offset], labels.get(body_part, body_part.title()))
             depth = depth_to_rainbow(rendered_depths[body_part][sample_offset], depth_min, depth_max)
             rows.append(np.concatenate([color, col_gap, depth], axis=1))
         stacked = np.concatenate([header, rows[0], row_gap, rows[1], row_gap, rows[2]], axis=0)
