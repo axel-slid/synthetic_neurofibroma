@@ -41,7 +41,7 @@ PANEL_WIDTH = 430
 PANEL_HEIGHT = 250
 PANEL_GAP = 8
 ROW_GAP = 6
-HEADER_HEIGHT = 30
+HEADER_HEIGHT = 0
 BACKGROUND = np.array([244, 246, 249], dtype=np.uint8)
 
 
@@ -102,21 +102,16 @@ def font(size: int) -> ImageFont.ImageFont:
         return ImageFont.load_default()
 
 
-def add_volume_label(frame: np.ndarray, volume_ml: float) -> np.ndarray:
+def add_view_label(frame: np.ndarray, label: str, volume_ml: float) -> np.ndarray:
     image = Image.fromarray(frame)
     draw = ImageDraw.Draw(image)
-    label_font = font(14)
-    text = f"Total lesion volume: {volume_ml:,.0f} mL"
-    text_bbox = draw.textbbox((0, 0), text, font=label_font)
-    text_w = text_bbox[2] - text_bbox[0]
-    draw.text((image.width - text_w - 14, 7), text, fill=(20, 20, 20), font=label_font)
-    return np.asarray(image)
-
-
-def add_view_label(frame: np.ndarray, label: str) -> np.ndarray:
-    image = Image.fromarray(frame)
-    draw = ImageDraw.Draw(image)
-    draw.text((10, 8), label, fill=(20, 20, 20), font=font(13))
+    label_font = font(13)
+    volume_font = font(12)
+    volume_text = f"Volume: {volume_ml:,.0f} mL"
+    volume_bbox = draw.textbbox((0, 0), volume_text, font=volume_font)
+    volume_w = volume_bbox[2] - volume_bbox[0]
+    draw.text((10, 8), label, fill=(20, 20, 20), font=label_font)
+    draw.text((PANEL_WIDTH - volume_w - 10, 9), volume_text, fill=(20, 20, 20), font=volume_font)
     return np.asarray(image)
 
 
@@ -334,15 +329,18 @@ def render_body_part_stack_gif(
     frames = []
     for sample_offset in range(len(next(iter(sample_indices.values())))):
         rows = []
-        total_volume_ml = 0.0
         for body_part in body_parts:
             depth_min, depth_max = depth_ranges[body_part]
-            color = add_view_label(rendered_rows[body_part][sample_offset], labels.get(body_part, body_part.title()))
+            volume_ml = rendered_volumes[body_part][sample_offset]
+            color = add_view_label(
+                rendered_rows[body_part][sample_offset],
+                labels.get(body_part, body_part.title()),
+                volume_ml,
+            )
             depth = depth_to_rainbow(rendered_depths[body_part][sample_offset], depth_min, depth_max)
             rows.append(np.concatenate([color, col_gap, depth], axis=1))
-            total_volume_ml += rendered_volumes[body_part][sample_offset]
         stacked = np.concatenate([header, rows[0], row_gap, rows[1], row_gap, rows[2]], axis=0)
-        frames.append(add_volume_label(stacked, total_volume_ml))
+        frames.append(stacked)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     imageio.mimsave(output_path, frames, duration=1 / fps, loop=0)
