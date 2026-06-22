@@ -1,15 +1,5 @@
 # Synthetic Neurofibroma
 
-Synthetic neurofibroma data-generation and depth-estimation experiments for
-HSR body scans. The repo contains project code, small public preview assets,
-literature notes, and documentation for generated local datasets.
-
-The large generated datasets, raw scans, rendered notebooks, meshes, arrays,
-and model outputs are intentionally kept local under `data/` and are ignored by
-normal Git commits.
-
-## Preview
-
 Body-part segmentation rotations:
 
 ![HSR body-part segmentation overlay rotation](docs/assets/hsr_body_part_segmentation_overlay_combined.gif)
@@ -22,7 +12,7 @@ Fitzpatrick images, Depth Pro maps, and 3D surfaces:
 
 ![Fitzpatrick original images, Depth Pro maps, and front-facing 3D surfaces](docs/assets/fitzpatrick_depthpro_surface_rotation.gif)
 
-Depth-map montage for back gaussian-interpolation lesions:
+Depth-map montage:
 
 ![Back gaussian interpolation RGB and depth montage](docs/assets/back_gaussian_interpolation_rgb_depth_montage.png)
 
