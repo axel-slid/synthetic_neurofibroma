@@ -1,8 +1,24 @@
 # Synthetic Neurofibroma
 
-This repository is for synthetic neurofibroma data generation, HSR body-scan processing, depth-map experiments, and Depth Pro visualizations.
+Synthetic neurofibroma data-generation and depth-estimation experiments for
+HSR body scans. The repo contains project code, small public preview assets,
+literature notes, and documentation for generated local datasets.
+
+The large generated datasets, raw scans, rendered notebooks, meshes, arrays,
+and model outputs are intentionally kept local under `data/` and are ignored by
+normal Git commits.
 
 ## Preview
+
+HSR textured scan turntables:
+
+![HSR0018 textured scan turntable](docs/assets/hsr0018_textured_camera.gif)
+
+![HSR0152 textured scan turntable](docs/assets/hsr0152_textured_camera.gif)
+
+Back gaussian-interpolation RGB/depth montage:
+
+![Back gaussian interpolation RGB and depth montage](docs/assets/back_gaussian_interpolation_rgb_depth_montage.png)
 
 Synthetic RGB/depth review montage:
 
@@ -17,6 +33,31 @@ Literature map preview:
 The current research plan is included here:
 
 [Alex-Dils_Research-Plan_06222026.docx](Alex-Dils_Research-Plan_06222026.docx)
+
+## Related Repository
+
+3D segmentation work is tracked separately in
+[axel-slid/3D-seg](https://github.com/axel-slid/3D-seg).
+
+## Getting Started
+
+Clone the repository:
+
+```bash
+git clone git@github.com:axel-slid/synthetic_neurofibroma.git
+cd synthetic_neurofibroma
+```
+
+Create or activate a Python environment, then install the lightweight project
+helpers in editable mode:
+
+```bash
+python -m pip install -e .
+```
+
+Large inputs and generated outputs are expected to exist locally under `data/`.
+They are not bundled with the public repo. See [data/README.md](data/README.md)
+for the dataset layout contract.
 
 ## Repository Layout
 
@@ -176,7 +217,7 @@ code/depth_maps/depth_pro/scripts/finetune_depth_pro_on_depth_maps.py
 Run Depth Pro on one image:
 
 ```bash
-python code/depth_pro/scripts/run_depth_pro.py path/to/image.jpg
+python code/depth_maps/depth_pro/scripts/run_depth_pro.py path/to/image.jpg
 ```
 
 Depth Pro outputs go under `data/predictions/`:
@@ -229,16 +270,9 @@ For every external code folder, keep a small README with:
 
 Do not mix external source files into project-owned script folders unless they have been deliberately adapted.
 
-## Quick Checks
+## Common Commands
 
-Install the lightweight project helpers in editable mode when you want to import
-`synthetic_nf` from notebooks or scripts:
-
-```bash
-python -m pip install -e .
-```
-
-Compile project Python scripts:
+Compile the core project scripts after edits:
 
 ```bash
 python -m py_compile \
@@ -250,12 +284,21 @@ python -m py_compile \
   code/depth_maps/scripts/update_depth_visualizations.py
 ```
 
-List the current high-level tree:
+List the current high-level local tree:
 
 ```bash
 find code data -maxdepth 2 -type d | sort
 ```
 
+Check the Git-tracked public payload before pushing:
+
+```bash
+git status --short
+git ls-files | sort
+```
+
 ## Notes
 
-This repo contains generated data and visual assets, so it can be large. Keep generated outputs organized under `data/` and keep reusable source code under `code/`.
+Keep reusable source code under `code/`. Keep generated outputs, raw scans,
+large notebooks, meshes, arrays, and model artifacts under `data/` unless there
+is a specific reason to promote a small preview asset into `docs/assets/`.
