@@ -10,6 +10,7 @@ from pathlib import Path
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
 import imageio.v2 as imageio
+from matplotlib import colormaps
 import numpy as np
 import pyrender
 import trimesh
@@ -54,6 +55,17 @@ def combine_lesion_frame(
     return trimesh.Trimesh(vertices=vertices, faces=faces, vertex_colors=rgba(colors), process=False)
 
 
+def depth_to_rainbow(depth: np.ndarray, depth_min: float, depth_max: float) -> np.ndarray:
+    valid = depth > 0.0
+    normalized = np.zeros_like(depth, dtype=np.float32)
+    normalized[valid] = np.clip((depth[valid] - depth_min) / max(depth_max - depth_min, 1e-6), 0.0, 1.0)
+    # Invert so nearer anatomy is warm/red and farther anatomy is cool/violet.
+    mapped = colormaps["rainbow"](1.0 - normalized)[:, :, :3]
+    depth_rgb = np.full((*depth.shape, 3), [244, 246, 249], dtype=np.uint8)
+    depth_rgb[valid] = np.clip(np.rint(mapped[valid] * 255.0), 0, 255).astype(np.uint8)
+    return depth_rgb
+
+
 def render_fixed_camera_growth_gif(npz_path: Path, output_path: Path, gif_frames: int, fps: int) -> None:
     payload = np.load(npz_path)
     body_vertices = payload["body_plot_vertices"].astype(np.float32)
@@ -79,8 +91,9 @@ def render_fixed_camera_growth_gif(npz_path: Path, output_path: Path, gif_frames
 
     frame_count = lesion_vertices.shape[1]
     sample_indices = np.unique(np.linspace(0, frame_count - 1, gif_frames, dtype=np.int32))
-    renderer = pyrender.OffscreenRenderer(viewport_width=900, viewport_height=650)
-    frames = []
+    renderer = pyrender.OffscreenRenderer(viewport_width=720, viewport_height=520)
+    color_frames = []
+    depth_frames = []
     try:
         for frame_index in sample_indices:
             scene = pyrender.Scene(bg_color=[244, 246, 249, 255], ambient_light=[0.78, 0.78, 0.78])
@@ -89,10 +102,20 @@ def render_fixed_camera_growth_gif(npz_path: Path, output_path: Path, gif_frames
             scene.add(pyrender.Mesh.from_trimesh(lesion_mesh, smooth=True))
             scene.add(pyrender.DirectionalLight(color=np.ones(3), intensity=2.0), pose=camera_pose)
             scene.add(pyrender.PerspectiveCamera(yfov=np.deg2rad(36.0), znear=0.01, zfar=8.0), pose=camera_pose)
-            color, _depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
-            frames.append(color[:, :, :3])
+            color, depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
+            color_frames.append(color[:, :, :3])
+            depth_frames.append(depth)
     finally:
         renderer.delete()
+
+    valid_depths = np.concatenate([depth[depth > 0.0] for depth in depth_frames])
+    depth_min = float(np.percentile(valid_depths, 1.0))
+    depth_max = float(np.percentile(valid_depths, 99.0))
+    gap = np.full((color_frames[0].shape[0], 8, 3), 244, dtype=np.uint8)
+    frames = [
+        np.concatenate([color, gap, depth_to_rainbow(depth, depth_min, depth_max)], axis=1)
+        for color, depth in zip(color_frames, depth_frames)
+    ]
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     imageio.mimsave(output_path, frames, duration=1 / fps, loop=0)
