@@ -35,6 +35,7 @@ PANEL_HEIGHT = 560
 PANEL_GAP = 8
 LEGEND_HEIGHT = 68
 BACKGROUND = (244, 246, 249)
+DEFAULT_MASK_ALPHA = 0.48
 
 
 def hex_to_rgb(hex_color: str) -> tuple[int, int, int]:
@@ -75,14 +76,17 @@ def rotation_about_z(angle_rad: float, center: np.ndarray) -> np.ndarray:
     return transform
 
 
-def load_label_mesh(npz_path: Path) -> tuple[trimesh.Trimesh, np.ndarray]:
+def load_label_mesh(npz_path: Path, mask_alpha: float) -> tuple[trimesh.Trimesh, np.ndarray]:
+    mask_alpha = float(np.clip(mask_alpha, 0.0, 1.0))
     payload = np.load(npz_path)
     label_names = [str(value) for value in payload["label_names"].tolist()]
     label_rgb = np.asarray([hex_to_rgb(LABEL_COLORS[name]) for name in label_names], dtype=np.uint8)
     vertices = payload["vertices"].astype(np.float32)
     faces = payload["triangles"].astype(np.int32)
+    base_colors = payload["vertex_colors"].astype(np.float32)
     labels = payload["vertex_labels"].astype(np.int32)
-    colors = label_rgb[labels]
+    overlay_colors = label_rgb[labels].astype(np.float32)
+    colors = np.clip((1.0 - mask_alpha) * base_colors + mask_alpha * overlay_colors, 0, 255).astype(np.uint8)
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, vertex_colors=rgba(colors), process=False)
     return mesh, vertices
 
@@ -133,10 +137,10 @@ def legend_image(width: int) -> Image.Image:
     return image
 
 
-def build_gif(segmentation_root: Path, output_path: Path, frames: int, fps: int) -> None:
+def build_gif(segmentation_root: Path, output_path: Path, frames: int, fps: int, mask_alpha: float) -> None:
     meshes = []
     for scan_id in SCAN_IDS:
-        mesh, vertices = load_label_mesh(segmentation_root / f"{scan_id}_body_part_segmentation.npz")
+        mesh, vertices = load_label_mesh(segmentation_root / f"{scan_id}_body_part_segmentation.npz", mask_alpha)
         meshes.append((mesh, vertices))
 
     width = PANEL_WIDTH * len(meshes) + PANEL_GAP * (len(meshes) - 1)
@@ -170,9 +174,10 @@ def main() -> None:
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--frames", type=int, default=36)
     parser.add_argument("--fps", type=int, default=12)
+    parser.add_argument("--mask-alpha", type=float, default=DEFAULT_MASK_ALPHA)
     args = parser.parse_args()
 
-    build_gif(args.segmentation_root, args.output, args.frames, args.fps)
+    build_gif(args.segmentation_root, args.output, args.frames, args.fps, args.mask_alpha)
     print(f"Wrote {root_relative(args.output)}")
 
 
