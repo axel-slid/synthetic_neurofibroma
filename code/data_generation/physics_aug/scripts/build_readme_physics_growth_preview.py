@@ -75,7 +75,7 @@ def render_fixed_camera_growth_gif(npz_path: Path, output_path: Path, gif_frames
     xyz_max = body_vertices.max(axis=0)
     center = (xyz_min + xyz_max) / 2.0
     target = np.array([center[0], center[1], center[2]], dtype=np.float64)
-    eye = np.array([center[0], xyz_min[1] - 2.85, center[2] + 0.04], dtype=np.float64)
+    eye = np.array([center[0], xyz_min[1] - 2.75, center[2] + 0.04], dtype=np.float64)
     camera_pose = look_at_camera_to_world(eye, target, np.array([0.0, 0.0, 1.0], dtype=np.float64))
 
     frame_count = lesion_vertices.shape[1]
@@ -89,7 +89,7 @@ def render_fixed_camera_growth_gif(npz_path: Path, output_path: Path, gif_frames
             lesion_mesh = combine_lesion_frame(lesion_vertices, lesion_faces, lesion_colors, int(frame_index))
             scene.add(pyrender.Mesh.from_trimesh(lesion_mesh, smooth=True))
             scene.add(pyrender.DirectionalLight(color=np.ones(3), intensity=2.0), pose=camera_pose)
-            scene.add(pyrender.PerspectiveCamera(yfov=np.deg2rad(37.0), znear=0.01, zfar=8.0), pose=camera_pose)
+            scene.add(pyrender.PerspectiveCamera(yfov=np.deg2rad(34.0), znear=0.01, zfar=8.0), pose=camera_pose)
             color, _depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
             frames.append(color[:, :, :3])
     finally:
