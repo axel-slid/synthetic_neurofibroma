@@ -14,8 +14,6 @@ Body-part segmentation rotations:
 
 ![HSR body-part segmentation overlay rotation](docs/assets/hsr_body_part_segmentation_overlay_combined.gif)
 
-![Manual body-part segmentation rotation](docs/assets/manual_body_part_segmentation_two_people_rotating.gif)
-
 Depth-map montage for back gaussian-interpolation lesions:
 
 ![Back gaussian interpolation RGB and depth montage](docs/assets/back_gaussian_interpolation_rgb_depth_montage.png)
