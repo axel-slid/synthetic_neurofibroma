@@ -14,6 +14,10 @@ Body-part segmentation rotations:
 
 ![HSR body-part segmentation overlay rotation](docs/assets/hsr_body_part_segmentation_overlay_combined.gif)
 
+Physics growth simulation:
+
+![Multiple-lesion physics growth progression](docs/assets/multiple_lesion_physics_growth_progression.gif)
+
 Depth-map montage for back gaussian-interpolation lesions:
 
 ![Back gaussian interpolation RGB and depth montage](docs/assets/back_gaussian_interpolation_rgb_depth_montage.png)

@@ -274,6 +274,7 @@ def make_rotation_gif(
     max_points: int,
     frames: int,
     fps: int,
+    label_alpha: float,
 ) -> None:
     rng = np.random.default_rng(7)
     if len(vertices) > max_points:
@@ -291,7 +292,12 @@ def make_rotation_gif(
     radius = float(np.quantile(np.sqrt(lateral**2 + anterior**2), 0.995)) * 1.08
     z_pad = 0.04 * params.height
     label_rgb = np.asarray([hex_to_rgb255(LABEL_COLORS[name]) for name in LABEL_NAMES], dtype=np.uint8)
-    colors = label_rgb[labels].copy()
+    label_alpha = float(np.clip(label_alpha, 0.0, 1.0))
+    colors = np.clip(
+        np.rint((1.0 - label_alpha) * texture_rgb.astype(np.float32) + label_alpha * label_rgb[labels].astype(np.float32)),
+        0,
+        255,
+    ).astype(np.uint8)
     clothes_mask = labels == LABEL_ID["clothes"]
     colors[clothes_mask] = texture_rgb[clothes_mask]
     frame_images = []
@@ -568,6 +574,7 @@ def process_scan(
     gif_frames: int,
     gif_fps: int,
     gif_points: int,
+    gif_label_alpha: float,
 ) -> dict[str, object]:
     mesh, vertices, triangles, vertex_colors, normals = read_mesh(mesh_path)
     vertex_labels, params, front_coord = segment_vertices(
@@ -611,6 +618,7 @@ def process_scan(
         max_points=gif_points,
         frames=gif_frames,
         fps=gif_fps,
+        label_alpha=gif_label_alpha,
     )
 
     return {
@@ -638,6 +646,12 @@ def main() -> None:
     parser.add_argument("--gif-frames", type=int, default=36)
     parser.add_argument("--gif-fps", type=int, default=12)
     parser.add_argument("--gif-points", type=int, default=80_000)
+    parser.add_argument(
+        "--gif-label-alpha",
+        type=float,
+        default=0.4,
+        help="Blend amount for body-part label colors in GIFs; lower values show more original skin/texture.",
+    )
     args = parser.parse_args()
 
     dataset_dir = args.hsr_root / args.dataset_name
@@ -671,6 +685,7 @@ def main() -> None:
             gif_frames=args.gif_frames,
             gif_fps=args.gif_fps,
             gif_points=args.gif_points,
+            gif_label_alpha=args.gif_label_alpha,
         )
         summary["scans"].append(scan_summary)
         counts = ", ".join(f"{name}={count:,}" for name, count in scan_summary["label_counts"].items())
