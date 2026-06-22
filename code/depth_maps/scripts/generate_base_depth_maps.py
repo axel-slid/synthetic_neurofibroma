@@ -17,7 +17,7 @@ import matplotlib
 import numpy as np
 import pyrender
 import trimesh
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 from trimesh.visual.texture import TextureVisuals
 
 matplotlib.use("Agg")
@@ -29,7 +29,8 @@ ROOT = Path(__file__).resolve().parents[3]
 HSR_ROOT = ROOT / "data" / "hsr" / "scans"
 OUTPUT_ROOT = ROOT / "data" / "depth_maps"
 BASE_ROOT = OUTPUT_ROOT / "base"
-PLOTS_ROOT = OUTPUT_ROOT / "plots"
+EXAMPLES_ROOT = BASE_ROOT / "images"
+PLOTS_ROOT = BASE_ROOT / "plots"
 
 
 @dataclass
@@ -188,34 +189,29 @@ def near_bright_depth_visual(depth: np.ndarray) -> np.ndarray:
     return vis
 
 
-def save_comparison_plot(rgb: np.ndarray, depth_vis: np.ndarray, title: str, output_path: Path) -> None:
-    fig, axes = plt.subplots(1, 2, figsize=(8, 4), constrained_layout=True)
+def save_comparison_plot(rgb: np.ndarray, depth_vis: np.ndarray, output_path: Path) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(8, 4))
     axes[0].imshow(rgb)
-    axes[0].set_title("2D render")
     axes[0].axis("off")
     axes[1].imshow(depth_vis, cmap="gray", vmin=0, vmax=255)
-    axes[1].set_title("depth: near bright, far dark")
     axes[1].axis("off")
-    fig.suptitle(title, fontsize=11)
+    fig.subplots_adjust(left=0, right=1, top=1, bottom=0, wspace=0, hspace=0)
     fig.savefig(output_path, dpi=150)
     plt.close(fig)
 
 
 def build_montage(rows: list[dict[str, Any]], output_path: Path, tile_size: int = 92, columns: int = 10) -> None:
-    font = ImageFont.load_default()
     tiles = []
     for row in rows:
-        rgb = Image.open(OUTPUT_ROOT / row["image_path"]).convert("RGB").resize((tile_size, tile_size), Image.Resampling.LANCZOS)
-        depth = Image.open(OUTPUT_ROOT / row["depth_vis_path"]).convert("L").resize((tile_size, tile_size), Image.Resampling.LANCZOS).convert("RGB")
-        tile = Image.new("RGB", (tile_size * 2, tile_size + 16), "white")
+        rgb = Image.open(BASE_ROOT / row["image_path"]).convert("RGB").resize((tile_size, tile_size), Image.Resampling.LANCZOS)
+        depth = Image.open(BASE_ROOT / row["depth_vis_path"]).convert("L").resize((tile_size, tile_size), Image.Resampling.LANCZOS).convert("RGB")
+        tile = Image.new("RGB", (tile_size * 2, tile_size), "white")
         tile.paste(rgb, (0, 0))
         tile.paste(depth, (tile_size, 0))
-        draw = ImageDraw.Draw(tile)
-        draw.text((3, tile_size + 2), row["sample_id"], fill=(20, 20, 20), font=font)
         tiles.append(tile)
 
     rows_count = int(math.ceil(len(tiles) / columns))
-    montage = Image.new("RGB", (columns * tile_size * 2, rows_count * (tile_size + 16)), "white")
+    montage = Image.new("RGB", (columns * tile_size * 2, rows_count * tile_size), "white")
     for idx, tile in enumerate(tiles):
         x = (idx % columns) * tile.width
         y = (idx // columns) * tile.height
@@ -224,13 +220,13 @@ def build_montage(rows: list[dict[str, Any]], output_path: Path, tile_size: int 
 
 
 def render_dataset(args: argparse.Namespace) -> None:
-    if OUTPUT_ROOT.exists() and args.overwrite:
-        shutil.rmtree(OUTPUT_ROOT)
+    if BASE_ROOT.exists() and args.overwrite:
+        shutil.rmtree(BASE_ROOT)
 
-    image_root = BASE_ROOT / "images"
-    depth_root = BASE_ROOT / "depth"
-    depth_vis_root = BASE_ROOT / "depth_vis"
-    metadata_root = BASE_ROOT / "metadata"
+    image_root = EXAMPLES_ROOT / "images"
+    depth_root = EXAMPLES_ROOT / "depth"
+    depth_vis_root = EXAMPLES_ROOT / "depth_vis"
+    metadata_root = EXAMPLES_ROOT / "metadata"
     for path in [image_root, depth_root, depth_vis_root, metadata_root, PLOTS_ROOT]:
         path.mkdir(parents=True, exist_ok=True)
 
@@ -283,17 +279,17 @@ def render_dataset(args: argparse.Namespace) -> None:
             np.save(depth_npy_path, depth)
             save_depth_png(depth, depth_png_path)
             imageio.imwrite(depth_vis_path, depth_vis)
-            save_comparison_plot(rgb, depth_vis, sample_id, plot_path)
+            save_comparison_plot(rgb, depth_vis, plot_path)
 
             row = {
                 "sample_id": sample_id,
                 "subject_id": subject.subject_id,
                 "view_index": view_index,
-                "image_path": str(image_path.relative_to(OUTPUT_ROOT)),
-                "depth_npy_path": str(depth_npy_path.relative_to(OUTPUT_ROOT)),
-                "depth_png_path": str(depth_png_path.relative_to(OUTPUT_ROOT)),
-                "depth_vis_path": str(depth_vis_path.relative_to(OUTPUT_ROOT)),
-                "plot_path": str(plot_path.relative_to(OUTPUT_ROOT)),
+                "image_path": str(image_path.relative_to(BASE_ROOT)),
+                "depth_npy_path": str(depth_npy_path.relative_to(BASE_ROOT)),
+                "depth_png_path": str(depth_png_path.relative_to(BASE_ROOT)),
+                "depth_vis_path": str(depth_vis_path.relative_to(BASE_ROOT)),
+                "plot_path": str(plot_path.relative_to(BASE_ROOT)),
                 "depth_type": "camera_z_distance",
                 "depth_visualization": "near_bright_far_dark_background_black_infinite",
                 "width": args.image_size,
@@ -324,7 +320,7 @@ def render_dataset(args: argparse.Namespace) -> None:
 
     renderer.delete()
 
-    manifest_csv = OUTPUT_ROOT / "manifest.csv"
+    manifest_csv = BASE_ROOT / "manifest.csv"
     with manifest_csv.open("w", encoding="utf-8", newline="") as handle:
         fieldnames = [
             "sample_id",
@@ -352,7 +348,7 @@ def render_dataset(args: argparse.Namespace) -> None:
         for row in rows:
             writer.writerow({key: row[key] for key in fieldnames})
 
-    montage_path = PLOTS_ROOT / "montage_all_rgb_depth.png"
+    montage_path = BASE_ROOT / "montage_all_rgb_depth.png"
     build_montage(rows, montage_path)
 
     summary = {
@@ -383,7 +379,7 @@ def render_dataset(args: argparse.Namespace) -> None:
             "montage": str(montage_path.relative_to(ROOT)),
         },
     }
-    (OUTPUT_ROOT / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+    (BASE_ROOT / "summary.json").write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(summary, indent=2), flush=True)
 
 

@@ -1,1 +1,6 @@
-- When I ask you to make a new data folder you should put the data in a subfolder and visualizations in another subfolder. The visualizations should NOT contain html files rather they should contain gif visualizations and .ipynb files that have been fully generated and have plotly plots to move 3D data interactively.
+-  Visualizations should NOT contain html files rather they should contain gif visualizations and .ipynb files that have been fully generated and have plotly plots to move 3D data interactively and then after the generate all of the plots, delete the code in the ipynb.
+-  Do NOT use sparse face-sampled, speckled, or dotted full-body meshes for visualizations. Full-body views must use a continuous body surface with a solid/smooth material; do not show the scan as a bunch of dots.
+-  You should ALWAYS double check your work to make sure that it is fully correct and does not contain hallucinations.
+-  Make sure you track all of your code changes on git
+-  If I ask you to prepare a folder to be copied to my local computer, i need you to give an scp -r command that copies it from dils001@gondor to my downloads folder.
+-  If you are doing a long task (>= 5 mins) you need to regularly report your eta in (days):(hours):(minutes):(seconds) and then additionally you need to print the time which you expect it will be done PST XX:XX am/pm (then the date if its >24hrs from now)

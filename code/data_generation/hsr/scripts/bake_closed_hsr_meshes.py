@@ -11,6 +11,7 @@ import open3d as o3d
 from PIL import Image
 
 Image.MAX_IMAGE_PIXELS = None
+ROOT = Path(__file__).resolve().parents[4]
 
 
 def parse_face_token(token: str) -> tuple[int, int]:
@@ -20,7 +21,7 @@ def parse_face_token(token: str) -> tuple[int, int]:
     return vertex_idx, texture_idx
 
 
-def load_obj_with_texture_colors(obj_path: Path, texture_path: Path, texture_size: int) -> o3d.geometry.TriangleMesh:
+def load_obj_with_texture_colors(obj_path: Path, texture_path: Path, texture_size: int | None) -> o3d.geometry.TriangleMesh:
     vertices: list[tuple[float, float, float]] = []
     texcoords: list[tuple[float, float]] = []
     faces: list[tuple[int, int, int]] = []
@@ -28,8 +29,9 @@ def load_obj_with_texture_colors(obj_path: Path, texture_path: Path, texture_siz
     color_counts: np.ndarray | None = None
 
     image = Image.open(texture_path).convert("RGB")
-    image.thumbnail((texture_size, texture_size), Image.Resampling.LANCZOS)
-    texture = np.asarray(image, dtype=np.float32) / 255.0
+    if texture_size is not None:
+        image.thumbnail((texture_size, texture_size), Image.Resampling.LANCZOS)
+    texture = np.asarray(image, dtype=np.uint8)
     tex_h, tex_w = texture.shape[:2]
 
     with obj_path.open("r", encoding="utf-8", errors="ignore") as handle:
@@ -57,7 +59,7 @@ def load_obj_with_texture_colors(obj_path: Path, texture_path: Path, texture_siz
                     u, v = 0.5, 0.5
                 px = int(np.clip(round(u * (tex_w - 1)), 0, tex_w - 1))
                 py = int(np.clip(round((1.0 - v) * (tex_h - 1)), 0, tex_h - 1))
-                color_sums[vertex_idx] += texture[py, px]
+                color_sums[vertex_idx] += texture[py, px].astype(np.float64) / 255.0
                 color_counts[vertex_idx] += 1.0
             faces.append(tuple(face))
 
@@ -126,9 +128,9 @@ def bake_scan(
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--hsr-root", type=Path, default=Path("/mnt/shared/dils/projects/synthetic_neurofibroma/data/hsr"))
+    parser.add_argument("--hsr-root", type=Path, default=ROOT / "data" / "hsr")
     parser.add_argument("--target-faces", type=int, default=120_000)
-    parser.add_argument("--texture-size", type=int, default=4096)
+    parser.add_argument("--texture-size", type=int, default=0, help="Maximum texture side; 0 uses the native full-resolution texture.")
     parser.add_argument("--method", choices=["quadric", "vertex-clustering"], default="vertex-clustering")
     parser.add_argument("--voxel-size", type=float, default=0.006)
     parser.add_argument("--scan-id", action="append", default=None)
@@ -138,7 +140,8 @@ def main() -> None:
     out_dir = args.hsr_root / "visualizations" / "meshes"
     scan_ids = args.scan_id or ["HSR0018-Body-070", "HSR0152-Body-090"]
     for scan_id in scan_ids:
-        bake_scan(scan_root, out_dir, scan_id, args.target_faces, args.texture_size, args.method, args.voxel_size)
+        texture_size = None if args.texture_size == 0 else args.texture_size
+        bake_scan(scan_root, out_dir, scan_id, args.target_faces, texture_size, args.method, args.voxel_size)
 
 
 if __name__ == "__main__":

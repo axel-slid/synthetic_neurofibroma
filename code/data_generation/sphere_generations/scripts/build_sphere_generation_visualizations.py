@@ -13,20 +13,26 @@ from pathlib import Path
 import nbformat as nbf
 import numpy as np
 import plotly.graph_objects as go
+from plotly.utils import PlotlyJSONEncoder
 from PIL import Image
 from plyfile import PlyData, PlyElement
 
 Image.MAX_IMAGE_PIXELS = None
 
-DATA_ROOT = Path("/mnt/shared/dils/projects/synthetic_neurofibroma/data")
+DATA_ROOT = Path(__file__).resolve().parents[4] / "data"
+SYNTHETIC_BODY_PARTS_ROOT = DATA_ROOT / "synthetic" / "single_lesion" / "body_parts"
+SYNTHETIC_VISUALIZATION_ROOT = DATA_ROOT / "synthetic" / "single_lesion" / "visualization"
 SCAN_IDS = ("HSR0018-Body-070", "HSR0152-Body-090")
 _CENTER_CACHE: dict[str, np.ndarray] = {}
+_SAMPLED_MESH_CACHE: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+_BASE_PLY_CACHE: dict[str, tuple[np.ndarray, np.ndarray, np.ndarray]] = {}
 
 
 @dataclass
 class GenerationFolder:
     name: str
     root: Path
+    visualization_root: Path
     metadata_dir: Path
     obj_dir: Path | None
     texture_dir: Path | None
@@ -98,6 +104,9 @@ def sampled_generation_center(scan_id: str, target_faces: int = 45_000) -> np.nd
 
 
 def sampled_generation_mesh(scan_id: str, target_faces: int = 45_000) -> tuple[np.ndarray, np.ndarray]:
+    if scan_id in _SAMPLED_MESH_CACHE:
+        return _SAMPLED_MESH_CACHE[scan_id]
+
     obj_path = DATA_ROOT / "hsr" / "scans" / scan_id / "scan" / f"{scan_id}.obj"
     vertices = []
     face_count = None
@@ -133,37 +142,477 @@ def sampled_generation_mesh(scan_id: str, target_faces: int = 45_000) -> tuple[n
             seen_faces += 1
 
     sampled_vertices = np.asarray(sampled_vertices, dtype=np.float32)
-    return sampled_vertices - sampled_vertices.mean(axis=0), np.asarray(sampled_faces, dtype=np.int32)
+    result = (sampled_vertices - sampled_vertices.mean(axis=0), np.asarray(sampled_faces, dtype=np.int32))
+    _SAMPLED_MESH_CACHE[scan_id] = result
+    return result
 
 
-def snap_boundary_vertices_to_skin(
-    lesion_vertices: np.ndarray,
+def read_base_mesh(scan_id: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    if scan_id not in _BASE_PLY_CACHE:
+        base_mesh_root = DATA_ROOT / "hsr" / "visualizations" / "meshes"
+        _BASE_PLY_CACHE[scan_id] = read_colored_ply(base_mesh_root / f"{scan_id}_closed_textured_mesh.ply")
+    return _BASE_PLY_CACHE[scan_id]
+
+
+def sample_skin_patch_points(
+    local_points: np.ndarray,
     anchor: np.ndarray,
     tangent_u: np.ndarray,
     tangent_v: np.ndarray,
     skin_vertices: np.ndarray,
     skin_faces: np.ndarray,
-    boundary_fraction: float = 0.98,
+    normal: np.ndarray | None = None,
+    footprint_radius: float | None = None,
+    max_normal_distance: float | None = None,
 ) -> np.ndarray:
-    lesion_offsets = lesion_vertices - anchor
-    lesion_plane = np.column_stack([lesion_offsets @ tangent_u, lesion_offsets @ tangent_v])
-    lesion_radius = np.linalg.norm(lesion_plane, axis=1)
-    max_radius = float(lesion_radius.max())
-    if max_radius <= 0:
-        return lesion_vertices
-    boundary = np.flatnonzero(lesion_radius >= boundary_fraction * max_radius)
-    if len(boundary) == 0:
-        return lesion_vertices
-    skin_centroids = skin_vertices[skin_faces].mean(axis=1)
-    skin_offsets = skin_centroids - anchor
-    skin_plane = np.column_stack([skin_offsets @ tangent_u, skin_offsets @ tangent_v])
-    snapped = lesion_vertices.copy()
-    for start in range(0, len(boundary), 256):
-        selected = boundary[start : start + 256]
-        delta = lesion_plane[selected, None, :] - skin_plane[None, :, :]
+    skin_triangles = skin_vertices[skin_faces]
+    skin_offsets = skin_triangles - anchor
+    skin_triangle_plane = np.stack([skin_offsets @ tangent_u, skin_offsets @ tangent_v], axis=2)
+    skin_plane = skin_triangle_plane.mean(axis=1)
+    if normal is not None and footprint_radius is not None:
+        local_n = skin_offsets.mean(axis=1) @ normal
+        candidate_mask = (np.linalg.norm(skin_plane, axis=1) <= max(1.75 * footprint_radius, footprint_radius + 0.012)) & (
+            np.abs(local_n) <= (max_normal_distance if max_normal_distance is not None else 0.018)
+        )
+        if candidate_mask.sum() >= 6:
+            skin_triangles = skin_triangles[candidate_mask]
+            skin_triangle_plane = skin_triangle_plane[candidate_mask]
+            skin_plane = skin_plane[candidate_mask]
+
+    sampled = np.empty((len(local_points), 3), dtype=np.float32)
+    for start in range(0, len(local_points), 256):
+        stop = start + 256
+        delta = local_points[start:stop, None, :] - skin_plane[None, :, :]
         nearest = np.argmin(np.sum(delta * delta, axis=2), axis=1)
-        snapped[selected] = skin_centroids[nearest]
+        targets = local_points[start:stop]
+        tri_plane = skin_triangle_plane[nearest]
+        tri_xyz = skin_triangles[nearest]
+
+        p0 = tri_plane[:, 0]
+        edge0 = tri_plane[:, 1] - p0
+        edge1 = tri_plane[:, 2] - p0
+        target_offset = targets - p0
+        d00 = np.sum(edge0 * edge0, axis=1)
+        d01 = np.sum(edge0 * edge1, axis=1)
+        d11 = np.sum(edge1 * edge1, axis=1)
+        d20 = np.sum(target_offset * edge0, axis=1)
+        d21 = np.sum(target_offset * edge1, axis=1)
+        denom = d00 * d11 - d01 * d01
+
+        weights = np.empty((len(targets), 3), dtype=np.float32)
+        valid = np.abs(denom) > 1e-12
+        weights[~valid] = 1.0 / 3.0
+        v = np.zeros(len(targets), dtype=np.float32)
+        w = np.zeros(len(targets), dtype=np.float32)
+        v[valid] = (d11[valid] * d20[valid] - d01[valid] * d21[valid]) / denom[valid]
+        w[valid] = (d00[valid] * d21[valid] - d01[valid] * d20[valid]) / denom[valid]
+        weights[valid, 1] = v[valid]
+        weights[valid, 2] = w[valid]
+        weights[valid, 0] = 1.0 - v[valid] - w[valid]
+        weights[valid] = np.clip(weights[valid], 0.0, None)
+        weight_sums = weights.sum(axis=1, keepdims=True)
+        empty = weight_sums[:, 0] <= 1e-8
+        weights[empty] = 1.0 / 3.0
+        weight_sums[empty] = 1.0
+        weights /= weight_sums
+        sampled[start:stop] = np.sum(tri_xyz * weights[:, :, None], axis=1)
+    return sampled
+
+
+def snap_outer_ring_to_skin(
+    points: np.ndarray,
+    radial_segments: int,
+    angular_segments: int,
+    anchor: np.ndarray,
+    tangent_u: np.ndarray,
+    tangent_v: np.ndarray,
+    skin_vertices: np.ndarray,
+    skin_faces: np.ndarray,
+    normal: np.ndarray | None = None,
+    footprint_radius: float | None = None,
+    max_normal_distance: float | None = None,
+) -> np.ndarray:
+    snapped = points.astype(np.float32).copy()
+    base_start = 1 + (radial_segments - 1) * angular_segments
+    rim = snapped[base_start : base_start + angular_segments]
+    offsets = rim - anchor
+    rim_local = np.column_stack([offsets @ tangent_u, offsets @ tangent_v]).astype(np.float32)
+    snapped[base_start : base_start + angular_segments] = sample_skin_patch_points(
+        rim_local,
+        anchor,
+        tangent_u,
+        tangent_v,
+        skin_vertices,
+        skin_faces,
+        normal=normal,
+        footprint_radius=footprint_radius,
+        max_normal_distance=max_normal_distance,
+    )
     return snapped
+
+
+def sphere_footprint_radius(metadata_path: Path) -> float:
+    meta = json.loads(metadata_path.read_text())
+    radius = float(meta["radius"])
+    height = float(meta["height"])
+    return float(np.sqrt(max(0.0, 2 * radius * height - height * height)))
+
+
+def remove_covered_skin_faces(
+    base_xyz: np.ndarray,
+    base_faces: np.ndarray,
+    metadata_path: Path,
+    center_offset: np.ndarray,
+    margin: float = 1.08,
+) -> np.ndarray:
+    return base_faces[~covered_skin_face_mask(base_xyz, base_faces, metadata_path, center_offset, margin=margin)]
+
+
+def covered_skin_face_mask(
+    base_xyz: np.ndarray,
+    base_faces: np.ndarray,
+    metadata_path: Path,
+    center_offset: np.ndarray,
+    margin: float = 1.08,
+) -> np.ndarray:
+    meta = json.loads(metadata_path.read_text())
+    anchor = np.asarray(meta["anchor"], dtype=np.float32) + center_offset
+    normal = np.asarray(meta["normal"], dtype=np.float32)
+    tangent_u = np.asarray(meta["tangent_u"], dtype=np.float32)
+    tangent_v = np.asarray(meta["tangent_v"], dtype=np.float32)
+    normal /= np.linalg.norm(normal)
+    tangent_u /= np.linalg.norm(tangent_u)
+    tangent_v /= np.linalg.norm(tangent_v)
+    footprint = sphere_footprint_radius(metadata_path) * margin
+    height = float(meta["height"])
+
+    centroids = base_xyz[base_faces].mean(axis=1)
+    offsets = centroids - anchor
+    local_u = offsets @ tangent_u
+    local_v = offsets @ tangent_v
+    local_n = offsets @ normal
+    radial = np.sqrt(local_u * local_u + local_v * local_v)
+    covered = (radial <= footprint) & (np.abs(local_n) <= max(0.06, 4.0 * height))
+    if covered.sum() == 0:
+        covered = radial <= footprint
+    return covered
+
+
+def boundary_edges_from_removed_faces(base_faces: np.ndarray, removed_mask: np.ndarray) -> np.ndarray:
+    edge_owners: dict[tuple[int, int], list[int]] = {}
+    for face_idx, face in enumerate(base_faces):
+        for a, b in ((int(face[0]), int(face[1])), (int(face[1]), int(face[2])), (int(face[2]), int(face[0]))):
+            edge = (a, b) if a < b else (b, a)
+            edge_owners.setdefault(edge, []).append(face_idx)
+
+    boundary_edges = []
+    for edge, owners in edge_owners.items():
+        removed_count = sum(bool(removed_mask[idx]) for idx in owners)
+        if 0 < removed_count < len(owners):
+            boundary_edges.append(edge)
+    return np.asarray(boundary_edges, dtype=np.int32)
+
+
+def ordered_boundary_loops(
+    boundary_edges: np.ndarray,
+    xyz: np.ndarray,
+    anchor: np.ndarray,
+    tangent_u: np.ndarray,
+    tangent_v: np.ndarray,
+) -> list[np.ndarray]:
+    if len(boundary_edges) < 3:
+        return []
+
+    adjacency: dict[int, list[int]] = {}
+    for a, b in boundary_edges.astype(int):
+        adjacency.setdefault(int(a), []).append(int(b))
+        adjacency.setdefault(int(b), []).append(int(a))
+
+    components = []
+    seen: set[int] = set()
+    for start in adjacency:
+        if start in seen:
+            continue
+        stack = [start]
+        component: set[int] = set()
+        while stack:
+            vertex = stack.pop()
+            if vertex in component:
+                continue
+            component.add(vertex)
+            stack.extend(adjacency.get(vertex, []))
+        seen.update(component)
+        components.append(component)
+
+    loops = []
+    for component in components:
+        component_adjacency = {vertex: [nbr for nbr in adjacency[vertex] if nbr in component] for vertex in component}
+        loop: list[int] = []
+        if all(len(neighbors) == 2 for neighbors in component_adjacency.values()):
+            start = min(component)
+            previous = -1
+            current = start
+            for _ in range(len(component) + 1):
+                loop.append(current)
+                neighbors = component_adjacency[current]
+                nxt = neighbors[0] if neighbors[0] != previous else neighbors[1]
+                if nxt == start:
+                    break
+                if nxt in loop:
+                    loop = []
+                    break
+                previous, current = current, nxt
+
+        if len(loop) < 3 or len(loop) != len(component):
+            vertices = np.asarray(sorted(component), dtype=np.int32)
+            offsets = xyz[vertices] - anchor
+            local_u = offsets @ tangent_u
+            local_v = offsets @ tangent_v
+            angles = np.arctan2(local_v, local_u)
+            loop = vertices[np.argsort(angles)].astype(int).tolist()
+
+        loop_array = np.asarray(loop, dtype=np.int32)
+        offsets = xyz[loop_array] - anchor
+        local_u = offsets @ tangent_u
+        local_v = offsets @ tangent_v
+        signed_area = float(np.sum(local_u * np.roll(local_v, -1) - np.roll(local_u, -1) * local_v))
+        if signed_area < 0.0:
+            loop_array = loop_array[::-1].copy()
+        if len(loop_array) >= 3:
+            loops.append(loop_array)
+    return sorted(loops, key=len, reverse=True)
+
+
+def ordered_boundary_loop(
+    boundary_edges: np.ndarray,
+    xyz: np.ndarray,
+    anchor: np.ndarray,
+    tangent_u: np.ndarray,
+    tangent_v: np.ndarray,
+) -> np.ndarray:
+    loops = ordered_boundary_loops(boundary_edges, xyz, anchor, tangent_u, tangent_v)
+    if not loops:
+        return np.empty(0, dtype=np.int32)
+    return loops[0]
+
+
+def sample_reference_vertex_colors(
+    reference_xyz: np.ndarray,
+    reference_rgb: np.ndarray,
+    target_xyz: np.ndarray,
+    anchor: np.ndarray,
+    normal: np.ndarray,
+    tangent_u: np.ndarray,
+    tangent_v: np.ndarray,
+    base_radius: float,
+    height: float,
+) -> np.ndarray:
+    if len(reference_xyz) == 0 or len(reference_rgb) == 0:
+        return np.zeros((len(target_xyz), 3), dtype=np.uint8)
+
+    def local_coords(points: np.ndarray) -> np.ndarray:
+        offsets = points - anchor
+        scale_uv = max(base_radius, 1e-6)
+        scale_n = max(height, 1e-6)
+        return np.column_stack(
+            [
+                (offsets @ tangent_u) / scale_uv,
+                (offsets @ tangent_v) / scale_uv,
+                (offsets @ normal) / scale_n,
+            ]
+        ).astype(np.float32)
+
+    ref_local = local_coords(reference_xyz)
+    target_local = local_coords(target_xyz)
+    out = np.empty((len(target_xyz), 3), dtype=np.uint8)
+    for start in range(0, len(target_local), 512):
+        stop = start + 512
+        delta = target_local[start:stop, None, :] - ref_local[None, :, :]
+        nearest = np.argmin(np.sum(delta * delta, axis=2), axis=1)
+        out[start:stop] = reference_rgb[nearest]
+    return out
+
+
+def build_welded_cap_from_metadata(
+    metadata_path: Path,
+    base_xyz: np.ndarray,
+    base_faces: np.ndarray,
+    base_rgb: np.ndarray,
+    center_offset: np.ndarray,
+    color: tuple[int, int, int] = (178, 96, 104),
+    reference_cap: tuple[np.ndarray, np.ndarray] | None = None,
+    radial_segments: int = 28,
+    margin: float = 1.08,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int | bool]]:
+    meta = json.loads(metadata_path.read_text())
+    radius = float(meta["radius"])
+    height = float(meta["height"])
+    anchor = np.asarray(meta["anchor"], dtype=np.float32) + center_offset
+    normal = np.asarray(meta["normal"], dtype=np.float32)
+    tangent_u = np.asarray(meta["tangent_u"], dtype=np.float32)
+    tangent_v = np.asarray(meta["tangent_v"], dtype=np.float32)
+    normal /= np.linalg.norm(normal)
+    tangent_u /= np.linalg.norm(tangent_u)
+    tangent_v /= np.linalg.norm(tangent_v)
+    base_radius = float(np.sqrt(max(0.0, 2 * radius * height - height * height)))
+
+    removed_mask = covered_skin_face_mask(base_xyz, base_faces, metadata_path, center_offset, margin=margin)
+    boundary_edges = boundary_edges_from_removed_faces(base_faces, removed_mask)
+    boundary_loops = ordered_boundary_loops(boundary_edges, base_xyz, anchor, tangent_u, tangent_v)
+    cut_edge_set = {tuple(sorted((int(a), int(b)))) for a, b in boundary_edges}
+    loop_edge_set: set[tuple[int, int]] = set()
+    for loop in boundary_loops:
+        for idx in range(len(loop)):
+            loop_edge_set.add(tuple(sorted((int(loop[idx]), int(loop[(idx + 1) % len(loop)])))))
+
+    def open_edges_for_faces(faces: np.ndarray) -> np.ndarray:
+        edges = np.vstack([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+        edges.sort(axis=1)
+        unique_edges, counts = np.unique(edges, axis=0, return_counts=True)
+        return unique_edges[counts == 1]
+
+    def count_open_edges(faces: np.ndarray) -> int:
+        return int(len(open_edges_for_faces(faces)))
+
+    def make_candidate(
+        label: str,
+        surface_edge_set: set[tuple[int, int]],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, int | bool | str]]:
+        surface_edges = (
+            np.asarray(sorted(surface_edge_set), dtype=np.int32) if surface_edge_set else np.empty((0, 2), dtype=np.int32)
+        )
+        boundary_vertices = np.unique(surface_edges.ravel()) if len(surface_edges) else np.empty(0, dtype=np.int32)
+        welded = len(surface_edges) >= 3 and len(boundary_vertices) >= 3
+        visible_base_faces = base_faces[~removed_mask] if welded else base_faces
+
+        if not welded:
+            angular_segments = 96
+            boundary_vertices = np.arange(angular_segments, dtype=np.int32)
+            surface_edges = np.column_stack([boundary_vertices, np.roll(boundary_vertices, -1)]).astype(np.int32)
+            local_boundary = np.stack(
+                [
+                    base_radius * np.cos(np.linspace(0, 2 * np.pi, angular_segments, endpoint=False)),
+                    base_radius * np.sin(np.linspace(0, 2 * np.pi, angular_segments, endpoint=False)),
+                ],
+                axis=1,
+            ).astype(np.float32)
+        else:
+            boundary_offsets = base_xyz[boundary_vertices] - anchor
+            local_boundary = np.column_stack([boundary_offsets @ tangent_u, boundary_offsets @ tangent_v]).astype(np.float32)
+            boundary_index = {int(vertex): idx for idx, vertex in enumerate(boundary_vertices)}
+
+        new_points: list[np.ndarray] = [anchor + height * normal]
+        for ring in range(1, radial_segments):
+            fraction = ring / radial_segments
+            rho = base_radius * fraction
+            z = np.sqrt(max(0.0, radius * radius - rho * rho)) + height - radius
+            local = local_boundary * fraction
+            ring_points = anchor + local[:, 0, None] * tangent_u + local[:, 1, None] * tangent_v + z * normal
+            new_points.extend(ring_points)
+        new_xyz = np.asarray(new_points, dtype=np.float32)
+
+        if reference_cap is not None:
+            reference_xyz, reference_rgb = reference_cap
+            new_rgb = sample_reference_vertex_colors(
+                reference_xyz,
+                reference_rgb,
+                new_xyz,
+                anchor,
+                normal,
+                tangent_u,
+                tangent_v,
+                base_radius,
+                height,
+            )
+        else:
+            boundary_rgb = base_rgb[boundary_vertices] if welded else np.asarray([color], dtype=np.uint8)
+            cap_color = np.median(boundary_rgb, axis=0).astype(np.uint8)
+            new_rgb = np.tile(cap_color, (len(new_xyz), 1))
+
+        cap_faces = []
+        new_offset = len(base_xyz)
+
+        def new_index(local_idx: int) -> int:
+            return new_offset + local_idx
+
+        vertex_count = len(boundary_vertices)
+        first_start = 1
+        if welded:
+            edge_pairs = [(boundary_index[int(a)], boundary_index[int(b)], int(a), int(b)) for a, b in surface_edges]
+        else:
+            edge_pairs = [(int(a), int(b), -1, -1) for a, b in surface_edges]
+
+        for inner_a, inner_b, _outer_a, _outer_b in edge_pairs:
+            cap_faces.append([new_index(0), new_index(first_start + inner_a), new_index(first_start + inner_b)])
+
+        for ring in range(1, radial_segments - 1):
+            prev_start = 1 + (ring - 1) * vertex_count
+            next_start = 1 + ring * vertex_count
+            for inner_a, inner_b, _outer_a, _outer_b in edge_pairs:
+                a = new_index(prev_start + inner_a)
+                b = new_index(prev_start + inner_b)
+                c = new_index(next_start + inner_a)
+                d = new_index(next_start + inner_b)
+                cap_faces.append([a, c, b])
+                cap_faces.append([b, c, d])
+
+        last_inner_start = 1 + (radial_segments - 2) * vertex_count
+        for inner_a, inner_b, outer_a, outer_b in edge_pairs:
+            a = new_index(last_inner_start + inner_a)
+            b = new_index(last_inner_start + inner_b)
+            if welded:
+                c = outer_a
+                d = outer_b
+            else:
+                c = new_index(first_start + inner_a)
+                d = new_index(first_start + inner_b)
+            cap_faces.append([a, c, b])
+            cap_faces.append([b, c, d])
+
+        combined_xyz = np.vstack([base_xyz, new_xyz])
+        combined_rgb = np.vstack([base_rgb, new_rgb])
+        combined_faces = np.vstack([visible_base_faces, np.asarray(cap_faces, dtype=np.int32)])
+        combined_faces = remove_degenerate_faces(combined_xyz, combined_faces)
+        edge_adjacency: dict[int, set[int]] = {}
+        for edge_a, edge_b in surface_edge_set:
+            edge_adjacency.setdefault(edge_a, set()).add(edge_b)
+            edge_adjacency.setdefault(edge_b, set()).add(edge_a)
+        for _ in range(2):
+            sliver_faces = []
+            for edge_a, edge_b in open_edges_for_faces(combined_faces):
+                edge_a = int(edge_a)
+                edge_b = int(edge_b)
+                if edge_a >= len(base_xyz) or edge_b >= len(base_xyz):
+                    continue
+                common = sorted(edge_adjacency.get(edge_a, set()) & edge_adjacency.get(edge_b, set()))
+                if common:
+                    sliver_faces.append([common[0], edge_a, edge_b])
+            if not sliver_faces:
+                break
+            combined_faces = np.vstack([combined_faces, np.asarray(sliver_faces, dtype=np.int32)])
+            combined_faces = remove_degenerate_faces(combined_xyz, combined_faces)
+        diagnostics = {
+            "welded": bool(welded),
+            "stitch_graph": label,
+            "open_boundary_edges": count_open_edges(combined_faces),
+            "removed_skin_faces": int(removed_mask.sum()) if welded else 0,
+            "boundary_vertices": int(len(boundary_vertices)) if welded else 0,
+            "boundary_edges": int(len(surface_edges)) if welded else 0,
+            "cut_boundary_edges": int(len(boundary_edges)) if welded else 0,
+            "boundary_components": int(sum(1 for loop in boundary_loops if len(loop) >= 3)) if welded else 0,
+            "cap_faces": int(len(cap_faces)),
+        }
+        return combined_xyz, combined_faces, combined_rgb, diagnostics
+
+    candidate_sets: list[tuple[str, set[tuple[int, int]]]] = [
+        ("cut", cut_edge_set),
+        ("loop", loop_edge_set),
+        ("cut_plus_loop", cut_edge_set | loop_edge_set),
+    ]
+    candidates = [make_candidate(label, edge_set) for label, edge_set in candidate_sets if edge_set]
+    if not candidates:
+        candidates = [make_candidate("fallback_circle", set())]
+    return min(candidates, key=lambda item: (int(item[3]["open_boundary_edges"]), int(item[3]["cap_faces"])))
 
 
 def write_colored_ply(path: Path, xyz: np.ndarray, faces: np.ndarray, rgb: np.ndarray) -> None:
@@ -181,6 +630,20 @@ def write_colored_ply(path: Path, xyz: np.ndarray, faces: np.ndarray, rgb: np.nd
     face_array = np.empty(len(faces), dtype=[("vertex_indices", "i4", (3,))])
     face_array["vertex_indices"] = faces
     PlyData([PlyElement.describe(vertices, "vertex"), PlyElement.describe(face_array, "face")], text=False).write(path)
+
+
+def save_preview_gif(preview_path: Path, gif_path: Path) -> None:
+    gif_path.parent.mkdir(parents=True, exist_ok=True)
+    with Image.open(preview_path) as image:
+        image.save(gif_path, format="GIF")
+
+
+def remove_degenerate_faces(xyz: np.ndarray, faces: np.ndarray, eps: float = 1e-12) -> np.ndarray:
+    if len(faces) == 0:
+        return faces
+    triangles = xyz[faces]
+    areas = np.linalg.norm(np.cross(triangles[:, 1] - triangles[:, 0], triangles[:, 2] - triangles[:, 0]), axis=1) / 2
+    return faces[areas > eps]
 
 
 def build_cap_from_metadata(
@@ -203,13 +666,37 @@ def build_cap_from_metadata(
     radial_segments = 28
     angular_segments = 96
     base_radius = float(np.sqrt(max(0.0, 2 * radius * height - height * height)))
-    points = [anchor + height * normal]
+    local_points = [np.array([0.0, 0.0], dtype=np.float32)]
+    profile_heights = [height]
     for ring in range(1, radial_segments + 1):
         rho = base_radius * ring / radial_segments
         z = np.sqrt(max(0.0, radius * radius - rho * rho)) + height - radius
         for step in range(angular_segments):
             theta = 2 * np.pi * step / angular_segments
-            points.append(anchor + rho * np.cos(theta) * tangent_u + rho * np.sin(theta) * tangent_v + z * normal)
+            local_points.append(np.array([rho * np.cos(theta), rho * np.sin(theta)], dtype=np.float32))
+            profile_heights.append(z)
+
+    local_points = np.asarray(local_points, dtype=np.float32)
+    profile_heights = np.asarray(profile_heights, dtype=np.float32)
+    points = (
+        anchor
+        + local_points[:, 0, None] * tangent_u
+        + local_points[:, 1, None] * tangent_v
+        + profile_heights[:, None] * normal
+    )
+    points = snap_outer_ring_to_skin(
+        points,
+        radial_segments,
+        angular_segments,
+        anchor,
+        tangent_u,
+        tangent_v,
+        skin_vertices,
+        skin_faces,
+        normal=normal,
+        footprint_radius=base_radius,
+        max_normal_distance=max(2.5 * height, 0.018),
+    )
 
     faces = []
     for step in range(angular_segments):
@@ -228,7 +715,7 @@ def build_cap_from_metadata(
     # Close the cap with a base disk at the body contact plane. The disk sits on the
     # closed body and prevents the cap mesh itself from having an open rim.
     center_idx = len(points)
-    points.append(anchor)
+    points = np.vstack([points, anchor])
     base_start = 1 + (radial_segments - 1) * angular_segments
     for step in range(angular_segments):
         a = base_start + step
@@ -236,8 +723,7 @@ def build_cap_from_metadata(
         faces.append([center_idx, b, a])
 
     xyz = np.asarray(points, dtype=np.float32)
-    xyz = snap_boundary_vertices_to_skin(xyz, anchor, tangent_u, tangent_v, skin_vertices, skin_faces)
-    face_arr = np.asarray(faces, dtype=np.int32)
+    face_arr = remove_degenerate_faces(xyz, np.asarray(faces, dtype=np.int32))
     rgb = np.tile(np.asarray(color, dtype=np.uint8), (len(xyz), 1))
     return xyz, face_arr, rgb
 
@@ -321,6 +807,7 @@ def close_open_cap_mesh(xyz: np.ndarray, faces: np.ndarray, rgb: np.ndarray) -> 
     rgb = np.vstack([rgb, np.median(rgb[boundary], axis=0, keepdims=True).astype(np.uint8)])
     disk_faces = [[center_idx, int(ring[(idx + 1) % len(ring)]), int(ring[idx])] for idx in range(len(ring))]
     faces = np.vstack([faces, np.asarray(disk_faces, dtype=np.int32)])
+    faces = remove_degenerate_faces(xyz, faces)
     return xyz, faces, rgb
 
 
@@ -376,8 +863,9 @@ def folder_configs() -> list[GenerationFolder]:
     return [
         GenerationFolder(
             name="sphere_generations",
-            root=DATA_ROOT / "synthetic" / "sphere_generations",
-            metadata_dir=DATA_ROOT / "synthetic" / "sphere_generations" / "metadata",
+            root=SYNTHETIC_BODY_PARTS_ROOT / "sphere_generations",
+            visualization_root=SYNTHETIC_VISUALIZATION_ROOT / "sphere_generations",
+            metadata_dir=SYNTHETIC_BODY_PARTS_ROOT / "sphere_generations" / "metadata",
             obj_dir=None,
             texture_dir=None,
             suffix="",
@@ -385,18 +873,20 @@ def folder_configs() -> list[GenerationFolder]:
         ),
         GenerationFolder(
             name="sphere_generations_textured_diffusion",
-            root=DATA_ROOT / "synthetic" / "sphere_generations_textured_diffusion",
-            metadata_dir=DATA_ROOT / "synthetic" / "sphere_generations_textured_diffusion" / "data" / "metadata",
-            obj_dir=DATA_ROOT / "synthetic" / "sphere_generations_textured_diffusion" / "data" / "objs",
-            texture_dir=DATA_ROOT / "synthetic" / "sphere_generations_textured_diffusion" / "data" / "textures",
+            root=SYNTHETIC_BODY_PARTS_ROOT / "sphere_generations_textured_diffusion",
+            visualization_root=SYNTHETIC_VISUALIZATION_ROOT / "sphere_generations_textured_diffusion",
+            metadata_dir=SYNTHETIC_BODY_PARTS_ROOT / "sphere_generations_textured_diffusion" / "data" / "metadata",
+            obj_dir=SYNTHETIC_BODY_PARTS_ROOT / "sphere_generations_textured_diffusion" / "data" / "objs",
+            texture_dir=SYNTHETIC_BODY_PARTS_ROOT / "sphere_generations_textured_diffusion" / "data" / "textures",
             suffix="_textured_diffusion",
             mode="obj_texture",
         ),
         GenerationFolder(
             name="sphere_generations_textured_interpolation",
-            root=DATA_ROOT / "synthetic" / "sphere_generations_textured_interpolation",
-            metadata_dir=DATA_ROOT / "synthetic" / "sphere_generations_textured_interpolation",
-            obj_dir=DATA_ROOT / "synthetic" / "sphere_generations_textured_interpolation" / "objs",
+            root=SYNTHETIC_BODY_PARTS_ROOT / "sphere_generations_textured_interpolation",
+            visualization_root=SYNTHETIC_VISUALIZATION_ROOT / "sphere_generations_textured_interpolation",
+            metadata_dir=SYNTHETIC_BODY_PARTS_ROOT / "sphere_generations_textured_interpolation",
+            obj_dir=SYNTHETIC_BODY_PARTS_ROOT / "sphere_generations_textured_interpolation" / "objs",
             texture_dir=None,
             suffix="_textured_interpolation",
             mode="obj_vertex_color",
@@ -411,19 +901,34 @@ def metadata_to_stem(metadata_path: Path, suffix: str) -> str:
     return stem
 
 
+def resolve_dataset_path(path_value: str) -> Path:
+    path = Path(path_value)
+    if path.is_absolute():
+        return path
+    candidate = DATA_ROOT / path
+    if candidate.exists():
+        return candidate
+    parts = path.parts
+    if len(parts) > 1 and parts[0] == "synthetic" and parts[1] not in {"single_lesion", "multiple_lesion"}:
+        single_candidate = DATA_ROOT / "synthetic" / "single_lesion" / "body_parts" / Path(*parts[1:])
+        if single_candidate.exists():
+            return single_candidate
+    return candidate
+
+
 def generation_items(folder: GenerationFolder) -> list[dict[str, object]]:
     if folder.name == "sphere_generations_textured_interpolation":
         manifest_path = folder.root / "manifest.csv"
         rows = []
         with manifest_path.open(newline="") as handle:
             for row in csv.DictReader(handle):
-                obj_path = DATA_ROOT / row["obj"]
+                obj_path = resolve_dataset_path(row["obj"])
                 rows.append(
                     {
                         "stem_base": obj_path.stem.removesuffix(folder.suffix),
                         "out_stem": obj_path.stem,
                         "scan_id": row["scan_id"],
-                        "metadata_path": DATA_ROOT / row["source_metadata"],
+                        "metadata_path": resolve_dataset_path(row["source_metadata"]),
                     }
                 )
         return rows
@@ -444,60 +949,73 @@ def generation_items(folder: GenerationFolder) -> list[dict[str, object]]:
     return items
 
 
-def clear_old_visualizations(folder: GenerationFolder) -> tuple[Path, Path, Path]:
-    vis_root = folder.root / "visualizations"
+def clear_old_visualizations(folder: GenerationFolder) -> tuple[Path, Path, Path, Path]:
+    vis_root = folder.visualization_root
     if vis_root.exists():
         shutil.rmtree(vis_root)
     mesh_root = vis_root / "meshes"
     preview_root = vis_root / "previews"
     notebook_root = vis_root / "plotly"
+    gif_root = vis_root / "gifs"
     mesh_root.mkdir(parents=True, exist_ok=True)
     preview_root.mkdir(parents=True, exist_ok=True)
     notebook_root.mkdir(parents=True, exist_ok=True)
-    return mesh_root, preview_root, notebook_root
+    gif_root.mkdir(parents=True, exist_ok=True)
+    return mesh_root, preview_root, notebook_root, gif_root
 
 
 def build_folder(folder: GenerationFolder) -> None:
-    mesh_root, preview_root, notebook_root = clear_old_visualizations(folder)
+    mesh_root, preview_root, notebook_root, gif_root = clear_old_visualizations(folder)
     records = []
-    base_mesh_root = DATA_ROOT / "hsr" / "visualizations" / "meshes"
     for item in generation_items(folder):
         stem_base = str(item["stem_base"])
         out_stem = str(item["out_stem"])
         scan_id = str(item["scan_id"])
         metadata_path = Path(item["metadata_path"])
-        base_xyz, base_faces, base_rgb = read_colored_ply(base_mesh_root / f"{scan_id}_closed_textured_mesh.ply")
-        skin_vertices, skin_faces = sampled_generation_mesh(scan_id)
-
-        if folder.mode == "metadata":
-            cap_xyz, cap_faces, cap_rgb = build_cap_from_metadata(metadata_path, skin_vertices, skin_faces)
-        else:
+        base_xyz, base_faces, base_rgb = read_base_mesh(scan_id)
+        center_offset = sampled_generation_center(scan_id)
+        reference_cap = None
+        if folder.mode != "metadata":
             obj_path = folder.obj_dir / f"{out_stem}.obj"
             texture_path = folder.texture_dir / f"{out_stem}.png" if folder.texture_dir is not None else None
             cap_xyz, cap_faces, cap_rgb = read_obj_cap(obj_path, texture_path)
-            cap_xyz, cap_faces, cap_rgb = close_open_cap_mesh(cap_xyz, cap_faces, cap_rgb)
+            reference_cap = (cap_xyz + center_offset, cap_rgb)
 
-        cap_xyz = cap_xyz + sampled_generation_center(scan_id)
-        cap_faces_offset = cap_faces + len(base_xyz)
-        combined_xyz = np.vstack([base_xyz, cap_xyz])
-        combined_faces = np.vstack([base_faces, cap_faces_offset])
-        combined_rgb = np.vstack([base_rgb, cap_rgb])
+        combined_xyz, combined_faces, combined_rgb, weld_diagnostics = build_welded_cap_from_metadata(
+            metadata_path,
+            base_xyz,
+            base_faces,
+            base_rgb,
+            center_offset,
+            reference_cap=reference_cap,
+        )
         out_ply = mesh_root / f"{out_stem}_closed_textured_visualization.ply"
         write_colored_ply(out_ply, combined_xyz, combined_faces, combined_rgb)
 
         preview_path = preview_root / f"{out_stem}_closed_plotly_preview.png"
         make_plotly_figure(out_ply, out_stem).write_image(preview_path, scale=1)
+        gif_path = gif_root / f"{out_stem}_closed_plotly_preview.gif"
+        save_preview_gif(preview_path, gif_path)
         records.append(
             {
                 "stem": out_stem,
                 "scan_id": scan_id,
-                "mesh": str(out_ply.relative_to(folder.root)),
-                "preview": str(preview_path.relative_to(folder.root)),
+                "mesh": str(out_ply.relative_to(folder.visualization_root)),
+                "preview": str(preview_path.relative_to(folder.visualization_root)),
+                "gif": str(gif_path.relative_to(folder.visualization_root)),
+                "welded": bool(weld_diagnostics["welded"]),
+                "stitch_graph": str(weld_diagnostics["stitch_graph"]),
+                "open_boundary_edges": int(weld_diagnostics["open_boundary_edges"]),
+                "removed_skin_faces": int(weld_diagnostics["removed_skin_faces"]),
+                "boundary_vertices": int(weld_diagnostics["boundary_vertices"]),
+                "boundary_edges": int(weld_diagnostics["boundary_edges"]),
+                "cut_boundary_edges": int(weld_diagnostics["cut_boundary_edges"]),
+                "boundary_components": int(weld_diagnostics["boundary_components"]),
             }
         )
         print(folder.name, out_stem, out_ply.name)
 
-    manifest_path = folder.root / "visualizations" / "manifest.json"
+    manifest_path = folder.visualization_root / "manifest.json"
     manifest_path.write_text(json.dumps(records, indent=2))
     write_notebook(folder, notebook_root, records)
 
@@ -514,7 +1032,13 @@ import numpy as np
 import plotly.graph_objects as go
 from plyfile import PlyData
 
-ROOT = Path('/mnt/shared/dils/projects/synthetic_neurofibroma/data/synthetic/{folder.name}')
+DATASET_NAME = '{folder.name}'
+ROOT_CANDIDATES = []
+for parent in (Path.cwd(), *Path.cwd().parents):
+    ROOT_CANDIDATES.append(parent / 'data' / 'synthetic' / 'single_lesion' / 'visualization' / DATASET_NAME)
+    ROOT_CANDIDATES.append(parent / 'data' / 'synthetic' / DATASET_NAME / 'visualizations')
+ROOT_CANDIDATES.append(Path.cwd())
+ROOT = next((path for path in ROOT_CANDIDATES if (path / 'manifest.json').exists()), ROOT_CANDIDATES[0])
 RECORDS = {records_json}
 SELECTED_RECORDS = {selected_json}
 
@@ -562,7 +1086,21 @@ def make_figure(record):
     ]
     for idx, record in enumerate(selected_records):
         cells.append(nbf.v4.new_markdown_cell(f"## {idx + 1}. {record['stem']}"))
-        cells.append(nbf.v4.new_code_cell(f"make_figure(SELECTED_RECORDS[{idx}])"))
+        fig = make_plotly_figure(folder.visualization_root / record["mesh"], record["stem"])
+        payload = json.loads(json.dumps(fig.to_plotly_json(), cls=PlotlyJSONEncoder))
+        cell = nbf.v4.new_code_cell(f"make_figure(SELECTED_RECORDS[{idx}])")
+        cell["execution_count"] = idx + 1
+        cell["outputs"] = [
+            nbf.v4.new_output(
+                output_type="display_data",
+                data={
+                    "application/vnd.plotly.v1+json": payload,
+                    "text/plain": f"<Plotly Figure: {record['stem']}>",
+                },
+                metadata={},
+            )
+        ]
+        cells.append(cell)
     nb = nbf.v4.new_notebook(cells=cells)
     notebook_path = notebook_root / f"{folder.name}_closed_plotly_viewer.ipynb"
     nbf.write(nb, notebook_path)

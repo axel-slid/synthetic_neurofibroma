@@ -15,15 +15,16 @@ from PIL import Image
 from transformers import pipeline
 
 
-ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_OUTPUT_DIR = ROOT / "visualizations" / "plotly"
+ROOT = Path(__file__).resolve().parents[4]
+DEFAULT_OUTPUT_ROOT = ROOT / "data" / "predictions" / "depth_pro_single"
 MODEL_ID = "apple/DepthPro-hf"
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("image", type=Path, help="Input RGB image.")
-    parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
+    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--output-dir", type=Path, default=None, help="Deprecated alias for --output-root.")
     parser.add_argument("--max-side", type=int, default=1024)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     return parser.parse_args()
@@ -74,19 +75,22 @@ def make_surface_figure(depth: np.ndarray) -> go.Figure:
 
 def main() -> None:
     args = parse_args()
-    args.output_dir.mkdir(parents=True, exist_ok=True)
+    output_root = (args.output_dir or args.output_root).resolve()
+    data_root = output_root / "data"
+    visualizations_root = output_root / "visualizations" / "plotly"
+    data_root.mkdir(parents=True, exist_ok=True)
+    visualizations_root.mkdir(parents=True, exist_ok=True)
+
     image = load_image(args.image, args.max_side)
     depth = predict_depth(image, args.device)
 
     stem = args.image.stem
-    depth_npy = args.output_dir / f"{stem}_depthpro_depth.npy"
-    plotly_json = args.output_dir / f"{stem}_depthpro_surface.plotly.json"
-    plotly_html = args.output_dir / f"{stem}_depthpro_surface.html"
-    metadata_path = args.output_dir / f"{stem}_depthpro_metadata.json"
+    depth_npy = data_root / f"{stem}_depthpro_depth.npy"
+    plotly_json = visualizations_root / f"{stem}_depthpro_surface.plotly.json"
+    metadata_path = data_root / f"{stem}_depthpro_metadata.json"
     np.save(depth_npy, depth.astype(np.float32))
     fig = make_surface_figure(depth)
     plotly_json.write_text(pio.to_json(fig), encoding="utf-8")
-    pio.write_html(fig, plotly_html, include_plotlyjs="cdn", full_html=True)
     metadata = {
         "model": MODEL_ID,
         "input": str(args.image),
@@ -94,16 +98,34 @@ def main() -> None:
         "resized_height": image.height,
         "depth_npy": str(depth_npy),
         "plotly_json": str(plotly_json),
-        "plotly_html": str(plotly_html),
         "depth_min": float(np.nanmin(depth)),
         "depth_max": float(np.nanmax(depth)),
         "depth_median": float(np.nanmedian(depth)),
     }
     metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    summary_path = output_root / "summary.json"
+    summary_path.write_text(
+        json.dumps(
+            {
+                "model": MODEL_ID,
+                "input": str(args.image),
+                "data": str(data_root),
+                "visualizations": str(visualizations_root.parent),
+                "outputs": {
+                    "depth_npy": str(depth_npy),
+                    "plotly_json": str(plotly_json),
+                    "metadata": str(metadata_path),
+                },
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     print(f"wrote {depth_npy}")
     print(f"wrote {plotly_json}")
-    print(f"wrote {plotly_html}")
     print(f"wrote {metadata_path}")
+    print(f"wrote {summary_path}")
 
 
 if __name__ == "__main__":

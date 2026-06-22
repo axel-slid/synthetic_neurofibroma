@@ -9,10 +9,10 @@ Status key:
 ## Synthetic Lesion Geometry
 
 - [x] Add spherical-cap lesions to HSR scans.
-  Sphere-cap placement metadata exists for HSR scans under `data/synthetic/sphere_generations/metadata`, with generation/visualization code under `code/data_generation/sphere_generations/scripts`.
+  Sphere-cap placement metadata exists for HSR scans under `data/synthetic/single_lesion/body_parts/sphere_generations/metadata`, with generation/visualization code under `code/data_generation/sphere_generations/scripts`.
 
 - [x] Add gaussian-bump lesions to HSR scans.
-  Gaussian lesion metadata exists under `data/synthetic/gaussian_generations/metadata`, with scripts under `code/data_generation/gaussian_generations/scripts`.
+  Gaussian lesion metadata exists under `data/synthetic/single_lesion/body_parts/gaussian_generations/metadata`, with scripts under `code/data_generation/gaussian_generations/scripts`.
 
 - [~] Make lesion morphology statistically and physically grounded.
   Current sphere/gaussian lesions are useful geometric prototypes. Next step is to parameterize location, radius, height, shape class, and growth using NF literature and real annotated data rather than hand-picked synthetic settings.
@@ -26,7 +26,7 @@ Status key:
 ## Ground-Truth Depth and Scale
 
 - [x] Create base HSR GT depth maps.
-  Base RGB/depth arrays and visualizations exist under `data/depth_maps/base` and `data/depth_maps/plots`, with scripts in `code/depth_maps/scripts`.
+  Base RGB/depth arrays, metadata, manifest, and visualizations exist under `data/depth_maps/base`, with scripts in `code/depth_maps/scripts`.
 
 - [~] Create GT depth maps for synthetic lesions.
   HSR base depth maps exist, and synthetic 3D lesion geometry exists. The next step is to export paired synthetic RGB/depth/mask data for every generated lesion with explicit lesion-only protrusion depth.
@@ -52,7 +52,7 @@ Status key:
   Interpolated OBJ/MTL outputs exist for synthetic sphere and gaussian lesions.
 
 - [x] Implement diffusion-based lesion texturing.
-  Text-conditioned diffusion textured datasets exist under `data/synthetic/sphere_generations_textured_diffusion` and `data/synthetic/gaussian_generations_textured_diffusion`.
+  Text-conditioned diffusion textured datasets exist under `data/synthetic/single_lesion/body_parts/sphere_generations_textured_diffusion` and `data/synthetic/single_lesion/body_parts/gaussian_generations_textured_diffusion`.
 
 - [x] Generate colored 3D versions.
   Colored OBJ/MTL outputs and texture assets exist for interpolation/diffusion textured synthetic lesions.

@@ -1,0 +1,179 @@
+{
+  "body_parts": [
+    "front",
+    "back",
+    "face",
+    "arms",
+    "hands",
+    "legs",
+    "feet"
+  ],
+  "expected_settings_per_method_folder": 1000,
+  "legacy_archive": "data/synthetic/_legacy_pre_bodypart_restructure",
+  "method_folder_count": 98,
+  "methods": [
+    "gaussian",
+    "gaussian_interpolation",
+    "gaussian_diffusion",
+    "spheres",
+    "spheres_interpolation",
+    "spheres_diffusion",
+    "physics_aug_growth"
+  ],
+  "missing_sources": [],
+  "moves": [
+    {
+      "dst": "data/synthetic/single_lesion/body_parts/front/physics_aug_growth",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth/body_parts_dataset/front"
+    },
+    {
+      "dst": "data/synthetic/single_lesion/body_parts/front/physics_aug_growth/visualization",
+      "src": "data/synthetic/multiple_lesion/visualization/physics_aug_growth/body_parts_dataset/front"
+    },
+    {
+      "dst": "data/synthetic/single_lesion/body_parts/back/physics_aug_growth",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth/body_parts_dataset/back"
+    },
+    {
+      "dst": "data/synthetic/single_lesion/body_parts/back/physics_aug_growth/visualization",
+      "src": "data/synthetic/multiple_lesion/visualization/physics_aug_growth/body_parts_dataset/back"
+    },
+    {
+      "dst": "data/synthetic/single_lesion/body_parts/face/physics_aug_growth",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth/body_parts_dataset/face"
+    },
+    {
+      "dst": "data/synthetic/single_lesion/body_parts/face/physics_aug_growth/visualization",
+      "src": "data/synthetic/multiple_lesion/visualization/physics_aug_growth/body_parts_dataset/face"
+    },
+    {
+      "dst": "data/synthetic/single_lesion/body_parts/arms/physics_aug_growth",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth/body_parts_dataset/arms"
+    },
+    {
+      "dst": "data/synthetic/single_lesion/body_parts/arms/physics_aug_growth/visualization",
+      "src": "data/synthetic/multiple_lesion/visualization/physics_aug_growth/body_parts_dataset/arms"
+    },
+    {
+      "dst": "data/synthetic/single_lesion/body_parts/hands/physics_aug_growth",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth/body_parts_dataset/hands"
+    },
+    {
+      "dst": "data/synthetic/single_lesion/body_parts/hands/physics_aug_growth/visualization",
+      "src": "data/synthetic/multiple_lesion/visualization/physics_aug_growth/body_parts_dataset/hands"
+    },
+    {
+      "dst": "data/synthetic/single_lesion/body_parts/legs/physics_aug_growth",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth/body_parts_dataset/legs"
+    },
+    {
+      "dst": "data/synthetic/single_lesion/body_parts/legs/physics_aug_growth/visualization",
+      "src": "data/synthetic/multiple_lesion/visualization/physics_aug_growth/body_parts_dataset/legs"
+    },
+    {
+      "dst": "data/synthetic/single_lesion/body_parts/feet/physics_aug_growth",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth/body_parts_dataset/feet"
+    },
+    {
+      "dst": "data/synthetic/single_lesion/body_parts/feet/physics_aug_growth/visualization",
+      "src": "data/synthetic/multiple_lesion/visualization/physics_aug_growth/body_parts_dataset/feet"
+    },
+    {
+      "dst": "data/synthetic/multiple_lesion/body_parts/front/physics_aug_growth/data",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth/body_parts_multi_lesion/data/front"
+    },
+    {
+      "dst": "data/synthetic/multiple_lesion/body_parts/back/physics_aug_growth/data",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth/body_parts_multi_lesion/data/back"
+    },
+    {
+      "dst": "data/synthetic/multiple_lesion/body_parts/face/physics_aug_growth/data",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth/body_parts_multi_lesion/data/face"
+    },
+    {
+      "dst": "data/synthetic/multiple_lesion/body_parts/arms/physics_aug_growth/data",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth/body_parts_multi_lesion/data/arms"
+    },
+    {
+      "dst": "data/synthetic/multiple_lesion/body_parts/hands/physics_aug_growth/data",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth/body_parts_multi_lesion/data/hands"
+    },
+    {
+      "dst": "data/synthetic/multiple_lesion/body_parts/legs/physics_aug_growth/data",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth/body_parts_multi_lesion/data/legs"
+    },
+    {
+      "dst": "data/synthetic/multiple_lesion/body_parts/feet/physics_aug_growth/data",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth/body_parts_multi_lesion/data/feet"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/single_lesion/visualization",
+      "src": "data/synthetic/single_lesion/visualization"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/single_lesion/body_parts/gaussian_generations",
+      "src": "data/synthetic/single_lesion/body_parts/gaussian_generations"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/single_lesion/body_parts/gaussian_generations_textured_diffusion",
+      "src": "data/synthetic/single_lesion/body_parts/gaussian_generations_textured_diffusion"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/single_lesion/body_parts/gaussian_generations_textured_interpolation",
+      "src": "data/synthetic/single_lesion/body_parts/gaussian_generations_textured_interpolation"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/single_lesion/body_parts/physics_aug_growth",
+      "src": "data/synthetic/single_lesion/body_parts/physics_aug_growth"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/single_lesion/body_parts/sphere_generations",
+      "src": "data/synthetic/single_lesion/body_parts/sphere_generations"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/single_lesion/body_parts/sphere_generations_textured_diffusion",
+      "src": "data/synthetic/single_lesion/body_parts/sphere_generations_textured_diffusion"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/single_lesion/body_parts/sphere_generations_textured_interpolation",
+      "src": "data/synthetic/single_lesion/body_parts/sphere_generations_textured_interpolation"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/multiple_lesion/visualization",
+      "src": "data/synthetic/multiple_lesion/visualization"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/multiple_lesion/body_parts/gaussian_generations",
+      "src": "data/synthetic/multiple_lesion/body_parts/gaussian_generations"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/multiple_lesion/body_parts/gaussian_generations_textured_diffusion",
+      "src": "data/synthetic/multiple_lesion/body_parts/gaussian_generations_textured_diffusion"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/multiple_lesion/body_parts/gaussian_generations_textured_interpolation",
+      "src": "data/synthetic/multiple_lesion/body_parts/gaussian_generations_textured_interpolation"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/multiple_lesion/body_parts/physics_aug_growth",
+      "src": "data/synthetic/multiple_lesion/body_parts/physics_aug_growth"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/multiple_lesion/body_parts/sphere_generations",
+      "src": "data/synthetic/multiple_lesion/body_parts/sphere_generations"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/multiple_lesion/body_parts/sphere_generations_textured_diffusion",
+      "src": "data/synthetic/multiple_lesion/body_parts/sphere_generations_textured_diffusion"
+    },
+    {
+      "dst": "data/synthetic/_legacy_pre_bodypart_restructure/multiple_lesion/body_parts/sphere_generations_textured_interpolation",
+      "src": "data/synthetic/multiple_lesion/body_parts/sphere_generations_textured_interpolation"
+    }
+  ],
+  "schema": "body_part_first_synthetic_lesions_v1",
+  "splits": [
+    "single_lesion",
+    "multiple_lesion"
+  ]
+}

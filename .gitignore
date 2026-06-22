@@ -23,15 +23,27 @@ env/
 data/**
 !data/README.md
 
-# Large Depth Pro notebook/Plotly assets. Keep local; do not commit without LFS.
+# Legacy compatibility pointer; generated Depth Pro assets belong under data/.
 code/depth_pro/visualizations/**
 !code/depth_pro/visualizations/README.md
 
 # Third-party repositories/code drops. Track only the policy README here.
 code/external/**
 !code/external/README.md
+!code/external/distance_model/
+!code/external/distance_model/README.md
+!code/external/nf_classifier/
+!code/external/nf_classifier/README.md
+!code/external/nf_locator/
+!code/external/nf_locator/README.md
+!code/external/nf_segmenter/
+!code/external/nf_segmenter/README.md
 
 # Generated model/checkpoint/artifact formats
+packages/
+*.zip
+*.tar
+*.tar.gz
 *.pt
 *.pth
 *.ckpt

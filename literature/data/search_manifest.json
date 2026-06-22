@@ -1,0 +1,30 @@
+{
+  "generated": "2026-06-20",
+  "scope": "NF1-associated neurofibroma literature for origin, growth/spread, microenvironment, and physical/modeling evidence.",
+  "queries": [
+    "neurofibroma cell of origin Schwann cell lineage NF1",
+    "plexiform neurofibroma growth dynamics volumetric MRI NF1",
+    "neurofibroma microenvironment mast cells macrophages fibroblasts extracellular matrix NF1",
+    "neurofibroma model physical computational mathematical extracellular matrix stiffness 3D culture",
+    "patient-derived cutaneous neurofibroma organoid plexiform neurofibroma 3D culture",
+    "NF1 plexiform neurofibroma malignant transformation atypical neurofibroma MPNST"
+  ],
+  "source_apis": [
+    "NCBI PubMed E-utilities",
+    "manual DOI/URL entry for newly published mechanobiology paper"
+  ],
+  "record_count": 39,
+  "categories": {
+    "genetics_signaling": "Genetics/signaling",
+    "cell_origin": "Cell of origin",
+    "growth_natural_history": "Growth/natural history",
+    "microenvironment": "Microenvironment",
+    "mechanics_ecm": "Mechanics/ECM",
+    "model_systems": "Model systems",
+    "malignant_transformation": "Malignant transformation"
+  },
+  "notes": [
+    "No PDF copies are stored here; links, identifiers, abstracts, and modeling annotations are stored to avoid copyright problems.",
+    "The 2026 mechanical-stiffening paper is included by DOI and publisher URL because PubMed metadata may lag publisher indexing."
+  ]
+}
