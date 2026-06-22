@@ -2,6 +2,22 @@
 
 This repository is for synthetic neurofibroma data generation, HSR body-scan processing, depth-map experiments, and Depth Pro visualizations.
 
+## Preview
+
+Synthetic RGB/depth review montage:
+
+![Synthetic lesion RGB and depth montage](docs/assets/front_all_rgb_depth_pairs_montage.gif)
+
+Literature map preview:
+
+![Interactive neurofibroma literature map rotation](literature/visualizations/literature_map_rotation.gif)
+
+## Research Plan
+
+The current research plan is included here:
+
+[Alex-Dils_Research-Plan_06222026.docx](Alex-Dils_Research-Plan_06222026.docx)
+
 ## Repository Layout
 
 ```text
@@ -10,9 +26,9 @@ synthetic_neurofibroma/
     synthetic_nf/           Shared project helpers for paths and dataset structure
     data_generation/        Project scripts for generating and visualizing synthetic lesions
     depth_maps/             Scripts for generating base HSR RGB/depth pairs and plots
-    depth_pro/              Depth Pro runners, prediction scripts, and fine-tuning scripts
+    depth_maps/depth_pro/   Depth Pro runners, prediction scripts, and fine-tuning scripts
     external/               Third-party or collaborator GitHub/code drops
-data/
+  data/
     depth_maps/             Generated RGB/depth examples, manifests, and plots
     hsr/                    HSR scan inputs and HSR mesh/Plotly visualizations
     predictions/            Model prediction/fine-tuning outputs
@@ -152,9 +168,9 @@ data/depth_maps/<dataset_name>/
 Depth Pro scripts are in:
 
 ```text
-code/depth_pro/scripts/run_depth_pro.py
-code/depth_pro/scripts/generate_base_depth_pro_predictions.py
-code/depth_pro/scripts/finetune_depth_pro_on_depth_maps.py
+code/depth_maps/depth_pro/scripts/run_depth_pro.py
+code/depth_maps/depth_pro/scripts/generate_base_depth_pro_predictions.py
+code/depth_maps/depth_pro/scripts/finetune_depth_pro_on_depth_maps.py
 ```
 
 Run Depth Pro on one image:
@@ -228,8 +244,8 @@ Compile project Python scripts:
 python -m py_compile \
   code/synthetic_nf/paths.py \
   code/synthetic_nf/datasets.py \
-  code/depth_pro/scripts/run_depth_pro.py \
-  code/depth_pro/scripts/generate_base_depth_pro_predictions.py \
+  code/depth_maps/depth_pro/scripts/run_depth_pro.py \
+  code/depth_maps/depth_pro/scripts/generate_base_depth_pro_predictions.py \
   code/depth_maps/scripts/generate_base_depth_maps.py \
   code/depth_maps/scripts/update_depth_visualizations.py
 ```
