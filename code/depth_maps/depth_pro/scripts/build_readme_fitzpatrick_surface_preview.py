@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the Fitzpatrick original-image plus rotating 3D surface GIF for README."""
+"""Build the stacked Fitzpatrick image plus rotating 3D surface GIF for README."""
 
 from __future__ import annotations
 
@@ -27,11 +27,12 @@ FITZPATRICK_PLOTLY_ROOT = (
     / "plotly"
     / "fitzpatrick_neurofibromatosis"
 )
-DEFAULT_SAMPLE_ID = "fitz_nf_0011"
+DEFAULT_SAMPLE_IDS = ("fitz_nf_0011", "fitz_nf_0037", "fitz_nf_0064")
 DEFAULT_OUTPUT = ROOT / "docs" / "assets" / "fitzpatrick_depthpro_surface_rotation.gif"
 PANEL_WIDTH = 430
-PANEL_HEIGHT = 360
+PANEL_HEIGHT = 250
 PANEL_GAP = 8
+ROW_GAP = 6
 BACKGROUND = (244, 246, 249)
 
 
@@ -85,27 +86,43 @@ def original_image_panel(image_path: Path) -> Image.Image:
     return panel
 
 
-def build_frame(original_panel: Image.Image, surface_rgb: np.ndarray) -> np.ndarray:
-    frame = Image.new("RGB", (PANEL_WIDTH * 2 + PANEL_GAP, PANEL_HEIGHT), BACKGROUND)
-    frame.paste(original_panel, (0, 0))
-    frame.paste(Image.fromarray(surface_rgb).convert("RGB"), (PANEL_WIDTH + PANEL_GAP, 0))
+def build_row(original_panel: Image.Image, surface_rgb: np.ndarray) -> Image.Image:
+    row = Image.new("RGB", (PANEL_WIDTH * 2 + PANEL_GAP, PANEL_HEIGHT), BACKGROUND)
+    row.paste(original_panel, (0, 0))
+    row.paste(Image.fromarray(surface_rgb).convert("RGB"), (PANEL_WIDTH + PANEL_GAP, 0))
+    return row
+
+
+def build_frame(rows: list[Image.Image]) -> np.ndarray:
+    height = len(rows) * PANEL_HEIGHT + max(0, len(rows) - 1) * ROW_GAP
+    frame = Image.new("RGB", (PANEL_WIDTH * 2 + PANEL_GAP, height), BACKGROUND)
+    for row_index, row in enumerate(rows):
+        frame.paste(row, (0, row_index * (PANEL_HEIGHT + ROW_GAP)))
     return np.asarray(frame)
 
 
-def build_gif(sample_id: str, output_path: Path, frames: int, fps: int, depth_scale: float) -> None:
-    image_path = FITZPATRICK_PLOTLY_ROOT / "images" / f"{sample_id}.jpg"
-    surface_path = FITZPATRICK_PLOTLY_ROOT / "surfaces" / f"{sample_id}_depthpro_surface_64.npz"
-    if not image_path.exists():
-        raise FileNotFoundError(f"Missing Fitzpatrick image: {image_path}")
-    if not surface_path.exists():
-        raise FileNotFoundError(f"Missing Fitzpatrick surface: {surface_path}")
+def build_gif(sample_ids: tuple[str, ...], output_path: Path, frames: int, fps: int, depth_scale: float) -> None:
+    if not sample_ids:
+        raise ValueError("At least one Fitzpatrick sample ID is required")
 
-    original_panel = original_image_panel(image_path)
+    samples: list[tuple[Image.Image, Path]] = []
+    for sample_id in sample_ids:
+        image_path = FITZPATRICK_PLOTLY_ROOT / "images" / f"{sample_id}.jpg"
+        surface_path = FITZPATRICK_PLOTLY_ROOT / "surfaces" / f"{sample_id}_depthpro_surface_64.npz"
+        if not image_path.exists():
+            raise FileNotFoundError(f"Missing Fitzpatrick image: {image_path}")
+        if not surface_path.exists():
+            raise FileNotFoundError(f"Missing Fitzpatrick surface: {surface_path}")
+        samples.append((original_image_panel(image_path), surface_path))
+
     images = []
     for frame_index in range(frames):
         angle = 2.0 * math.pi * frame_index / frames
-        surface_rgb = render_surface(surface_path, angle, depth_scale)
-        images.append(build_frame(original_panel, surface_rgb))
+        rows = []
+        for original_panel, surface_path in samples:
+            surface_rgb = render_surface(surface_path, angle, depth_scale)
+            rows.append(build_row(original_panel, surface_rgb))
+        images.append(build_frame(rows))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     imageio.mimsave(output_path, images, duration=1 / fps, loop=0)
@@ -120,14 +137,22 @@ def root_relative(path: Path) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--sample-id", default=DEFAULT_SAMPLE_ID)
+    parser.add_argument("--sample-id", default=None, help="Render one Fitzpatrick sample ID.")
+    parser.add_argument("--sample-ids", nargs="+", default=None, help="Render stacked Fitzpatrick sample IDs.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
     parser.add_argument("--frames", type=int, default=24)
     parser.add_argument("--fps", type=int, default=8)
     parser.add_argument("--depth-scale", type=float, default=0.85)
     args = parser.parse_args()
 
-    build_gif(args.sample_id, args.output, args.frames, args.fps, args.depth_scale)
+    if args.sample_ids:
+        sample_ids = tuple(args.sample_ids)
+    elif args.sample_id:
+        sample_ids = (args.sample_id,)
+    else:
+        sample_ids = DEFAULT_SAMPLE_IDS
+
+    build_gif(sample_ids, args.output, args.frames, args.fps, args.depth_scale)
     print(f"Wrote {root_relative(args.output)}")
 
 
