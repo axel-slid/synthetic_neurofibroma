@@ -10,7 +10,6 @@ from pathlib import Path
 
 os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
 
-import imageio.v2 as imageio
 import numpy as np
 import pyrender
 import trimesh
@@ -137,6 +136,67 @@ def legend_image(width: int) -> Image.Image:
     return image
 
 
+def fixed_palette_image(frames: list[Image.Image]) -> Image.Image:
+    palette_colors = [hex_to_rgb(color) for color in LABEL_COLORS.values()]
+    palette_colors.extend([BACKGROUND, (22, 28, 36), (255, 255, 255), (0, 0, 0)])
+
+    if frames:
+        source = Image.new("RGB", (frames[0].width, frames[0].height * len(frames)))
+        for frame_index, frame in enumerate(frames):
+            source.paste(frame.convert("RGB"), (0, frame_index * frames[0].height))
+        adaptive_count = 256 - len(palette_colors)
+        adaptive = source.quantize(colors=adaptive_count, method=Image.Quantize.MEDIANCUT, dither=Image.Dither.NONE)
+        adaptive_palette = adaptive.getpalette()[: adaptive_count * 3]
+        adaptive_colors = [
+            tuple(adaptive_palette[index : index + 3])
+            for index in range(0, len(adaptive_palette), 3)
+        ]
+        seen = set(palette_colors)
+        for color in adaptive_colors:
+            if color not in seen:
+                palette_colors.append(color)
+                seen.add(color)
+
+    palette_colors = palette_colors[:256]
+    palette_colors.extend([BACKGROUND] * (256 - len(palette_colors)))
+
+    palette = Image.new("P", (16, 16))
+    palette.putpalette([channel for color in palette_colors for channel in color])
+    return palette
+
+
+def stamp_fixed_legend_swatches(frame: Image.Image) -> None:
+    draw = ImageDraw.Draw(frame)
+    start_x = 18
+    row_y = (12, 38)
+    col_w = 104
+    for idx, _name in enumerate(LABEL_COLORS):
+        row = idx // 4
+        col = idx % 4
+        x = start_x + col * col_w
+        y = row_y[row]
+        draw.rounded_rectangle((x, y + 2, x + 16, y + 18), radius=2, fill=idx)
+
+
+def save_fixed_palette_gif(frames: list[Image.Image], output_path: Path, fps: int) -> None:
+    if not frames:
+        raise ValueError("At least one frame is required")
+    palette = fixed_palette_image(frames)
+    quantized_frames = [frame.quantize(palette=palette, dither=Image.Dither.NONE) for frame in frames]
+    for frame in quantized_frames:
+        stamp_fixed_legend_swatches(frame)
+    duration_ms = max(1, int(round(1000 / fps)))
+    quantized_frames[0].save(
+        output_path,
+        save_all=True,
+        append_images=quantized_frames[1:],
+        duration=duration_ms,
+        loop=0,
+        optimize=False,
+        disposal=2,
+    )
+
+
 def build_gif(segmentation_root: Path, output_path: Path, frames: int, fps: int, mask_alpha: float) -> None:
     meshes = []
     for scan_id in SCAN_IDS:
@@ -155,10 +215,10 @@ def build_gif(segmentation_root: Path, output_path: Path, frames: int, fps: int,
             panel = Image.fromarray(render_scan_panel(mesh, vertices, angle)).convert("RGB")
             canvas.paste(panel, (x, LEGEND_HEIGHT))
             x += PANEL_WIDTH + PANEL_GAP
-        images.append(np.asarray(canvas))
+        images.append(canvas)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    imageio.mimsave(output_path, images, duration=1 / fps, loop=0)
+    save_fixed_palette_gif(images, output_path, fps)
 
 
 def root_relative(path: Path) -> str:
