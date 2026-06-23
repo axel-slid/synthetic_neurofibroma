@@ -15,7 +15,7 @@ from matplotlib import colormaps
 import numpy as np
 import pyrender
 import trimesh
-from PIL import Image, ImageEnhance, ImageOps
+from PIL import Image, ImageOps
 
 ROOT = Path(__file__).resolve().parents[4]
 FITZPATRICK_PLOTLY_ROOT = (
@@ -62,10 +62,10 @@ def look_at_pose(eye: tuple[float, float, float], target: tuple[float, float, fl
 
 def add_surface_lights(scene: pyrender.Scene) -> None:
     for eye, intensity, color in (
-        ((-1.9, -1.7, 3.2), 0.84, (1.00, 0.96, 0.90)),
-        ((0.25, -0.35, 3.2), 0.28, (1.00, 0.97, 0.92)),
-        ((1.8, 1.2, 2.6), 0.20, (0.96, 0.98, 1.00)),
-        ((0.0, -2.6, 1.8), 0.14, (1.00, 0.96, 0.90)),
+        ((-1.9, -1.7, 3.2), 0.86, (1.0, 1.0, 1.0)),
+        ((0.25, -0.35, 3.2), 0.32, (1.0, 1.0, 1.0)),
+        ((1.8, 1.2, 2.6), 0.18, (1.0, 1.0, 1.0)),
+        ((0.0, -2.6, 1.8), 0.12, (1.0, 1.0, 1.0)),
     ):
         scene.add(
             pyrender.DirectionalLight(color=np.asarray(color), intensity=intensity),
@@ -74,15 +74,7 @@ def add_surface_lights(scene: pyrender.Scene) -> None:
 
 
 def enhance_surface_colors(rgb: np.ndarray) -> np.ndarray:
-    values = rgb.astype(np.float32)
-    luminance = values @ np.asarray([0.2126, 0.7152, 0.0722], dtype=np.float32)
-    values = luminance[:, None] + 1.26 * (values - luminance[:, None])
-    center = values.mean(axis=0, keepdims=True)
-    values = center + 1.10 * (values - center)
-    mean_luminance = max(float(luminance.mean()), 1.0)
-    target_luminance = max(min(mean_luminance * 0.92, 186.0), 78.0)
-    values *= target_luminance / mean_luminance
-    return np.clip(values, 0, 255).astype(np.uint8)
+    return rgb.astype(np.uint8)
 
 
 def glossy_vertex_mesh(mesh: trimesh.Trimesh) -> pyrender.Mesh:
@@ -94,11 +86,26 @@ def glossy_vertex_mesh(mesh: trimesh.Trimesh) -> pyrender.Mesh:
     return render_mesh
 
 
-def restore_rendered_color(rgb: np.ndarray) -> np.ndarray:
-    image = Image.fromarray(rgb[:, :, :3]).convert("RGB")
-    image = ImageEnhance.Color(image).enhance(1.18)
-    image = ImageEnhance.Contrast(image).enhance(1.03)
-    return np.asarray(image, dtype=np.uint8)
+def foreground_mask(depth: np.ndarray) -> np.ndarray:
+    return np.isfinite(depth) & (depth > 0)
+
+
+def match_rendered_color_statistics(rgb: np.ndarray, depth: np.ndarray, reference_rgb: np.ndarray) -> np.ndarray:
+    mask = foreground_mask(depth)
+    if int(mask.sum()) < 8:
+        return rgb[:, :, :3]
+
+    image = rgb[:, :, :3].astype(np.float32)
+    rendered = image[mask]
+    reference = reference_rgb.astype(np.float32)
+
+    rendered_mean = rendered.mean(axis=0)
+    rendered_std = np.maximum(rendered.std(axis=0), 1.0)
+    reference_mean = reference.mean(axis=0)
+    reference_std = np.maximum(reference.std(axis=0), 1.0)
+    matched = (rendered - rendered_mean) * (reference_std / rendered_std) + reference_mean
+    image[mask] = np.clip(0.92 * matched + 0.08 * rendered, 0, 255)
+    return image.astype(np.uint8)
 
 
 def rgba(rgb: np.ndarray) -> np.ndarray:
@@ -148,7 +155,13 @@ def resampled_surface(surface_path: Path, image_path: Path, side: int) -> tuple[
     return vertices, faces, colors
 
 
-def centered_surface_mesh(surface_path: Path, image_path: Path, angle_rad: float, depth_scale: float, render_side: int) -> trimesh.Trimesh:
+def centered_surface_mesh(
+    surface_path: Path,
+    image_path: Path,
+    angle_rad: float,
+    depth_scale: float,
+    render_side: int,
+) -> tuple[trimesh.Trimesh, np.ndarray]:
     vertices, faces, colors = resampled_surface(surface_path, image_path, render_side)
     vertices = vertices - (vertices.min(axis=0) + vertices.max(axis=0)) / 2.0
     vertices[:, 1] *= -1.0
@@ -157,11 +170,11 @@ def centered_surface_mesh(surface_path: Path, image_path: Path, angle_rad: float
 
     mesh = trimesh.Trimesh(vertices=vertices, faces=faces, vertex_colors=rgba(enhance_surface_colors(colors)), process=False)
     mesh.apply_transform(trimesh.transformations.rotation_matrix(angle_rad, [0.0, 1.0, 0.0]))
-    return mesh
+    return mesh, colors
 
 
 def render_surface(surface_path: Path, image_path: Path, angle_rad: float, depth_scale: float, render_side: int) -> np.ndarray:
-    mesh = centered_surface_mesh(surface_path, image_path, angle_rad, depth_scale, render_side)
+    mesh, reference_colors = centered_surface_mesh(surface_path, image_path, angle_rad, depth_scale, render_side)
     scene = pyrender.Scene(bg_color=[*BACKGROUND, 255], ambient_light=[0.23, 0.23, 0.23])
     scene.add(glossy_vertex_mesh(mesh))
 
@@ -175,7 +188,7 @@ def render_surface(surface_path: Path, image_path: Path, angle_rad: float, depth
         color, _depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
     finally:
         renderer.delete()
-    return restore_rendered_color(color[:, :, :3])
+    return match_rendered_color_statistics(color[:, :, :3], _depth, reference_colors)
 
 
 def original_image_panel(image_path: Path) -> Image.Image:
