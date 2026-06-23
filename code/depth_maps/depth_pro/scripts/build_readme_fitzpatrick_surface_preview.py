@@ -37,6 +37,8 @@ PANEL_GAP = 8
 ROW_GAP = 6
 RENDER_SURFACE_SIDE = 160
 BACKGROUND = (244, 246, 249)
+DEFAULT_FRAMES = 96
+DEFAULT_FPS = 40
 
 
 def look_at_pose(eye: tuple[float, float, float], target: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> np.ndarray:
@@ -231,6 +233,25 @@ def build_frame(rows: list[Image.Image]) -> np.ndarray:
     return np.asarray(frame)
 
 
+def gif_frame_durations_ms(frame_count: int, fps: int) -> list[int]:
+    if frame_count <= 0:
+        return []
+    if fps <= 0:
+        raise ValueError(f"FPS must be positive, got {fps}")
+    cumulative_centiseconds = [int(round(index * 100 / fps)) for index in range(frame_count + 1)]
+    durations = []
+    for start, stop in zip(cumulative_centiseconds[:-1], cumulative_centiseconds[1:], strict=True):
+        durations.append(max(1, stop - start) * 10)
+    return durations
+
+
+def gif_duration_arg(frame_count: int, fps: int) -> int | list[int]:
+    durations = gif_frame_durations_ms(frame_count, fps)
+    if len(durations) == 1:
+        return durations[0]
+    return durations
+
+
 def build_gif(
     sample_ids: tuple[str, ...],
     output_path: Path,
@@ -264,7 +285,7 @@ def build_gif(
         images.append(build_frame(rows))
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    imageio.mimsave(output_path, images, duration=1 / fps, loop=0)
+    imageio.mimsave(output_path, images, duration=gif_duration_arg(len(images), fps), loop=0)
 
 
 def root_relative(path: Path) -> str:
@@ -279,8 +300,8 @@ def main() -> None:
     parser.add_argument("--sample-id", default=None, help="Render one Fitzpatrick sample ID.")
     parser.add_argument("--sample-ids", nargs="+", default=None, help="Render stacked Fitzpatrick sample IDs.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
-    parser.add_argument("--frames", type=int, default=32)
-    parser.add_argument("--fps", type=int, default=4)
+    parser.add_argument("--frames", type=int, default=DEFAULT_FRAMES)
+    parser.add_argument("--fps", type=int, default=DEFAULT_FPS)
     parser.add_argument("--depth-scale", type=float, default=0.85)
     parser.add_argument("--front-yaw-degrees", type=float, default=14.0)
     parser.add_argument("--render-side", type=int, default=RENDER_SURFACE_SIDE)
