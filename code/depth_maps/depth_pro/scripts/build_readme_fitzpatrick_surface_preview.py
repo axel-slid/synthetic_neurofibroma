@@ -62,8 +62,9 @@ def look_at_pose(eye: tuple[float, float, float], target: tuple[float, float, fl
 
 def add_surface_lights(scene: pyrender.Scene) -> None:
     for eye, intensity in (
-        ((-1.9, -1.7, 3.2), 0.72),
-        ((1.8, 1.2, 2.6), 0.18),
+        ((-1.9, -1.7, 3.2), 0.84),
+        ((0.25, -0.35, 3.2), 0.34),
+        ((1.8, 1.2, 2.6), 0.20),
         ((0.0, -2.6, 1.8), 0.14),
     ):
         scene.add(
@@ -75,13 +76,22 @@ def add_surface_lights(scene: pyrender.Scene) -> None:
 def enhance_surface_colors(rgb: np.ndarray) -> np.ndarray:
     values = rgb.astype(np.float32)
     luminance = values @ np.asarray([0.2126, 0.7152, 0.0722], dtype=np.float32)
-    values = luminance[:, None] + 1.24 * (values - luminance[:, None])
+    values = luminance[:, None] + 1.10 * (values - luminance[:, None])
     center = values.mean(axis=0, keepdims=True)
-    values = center + 1.18 * (values - center)
+    values = center + 1.08 * (values - center)
     mean_luminance = max(float(luminance.mean()), 1.0)
-    target_luminance = max(min(mean_luminance * 0.78, 165.0), 70.0)
+    target_luminance = max(min(mean_luminance * 0.90, 182.0), 78.0)
     values *= target_luminance / mean_luminance
     return np.clip(values, 0, 255).astype(np.uint8)
+
+
+def glossy_vertex_mesh(mesh: trimesh.Trimesh) -> pyrender.Mesh:
+    render_mesh = pyrender.Mesh.from_trimesh(mesh, smooth=True)
+    for primitive in render_mesh.primitives:
+        primitive.material.metallicFactor = 0.0
+        primitive.material.roughnessFactor = 0.28
+        primitive.material.baseColorFactor = [1.0, 1.0, 1.0, 1.0]
+    return render_mesh
 
 
 def rgba(rgb: np.ndarray) -> np.ndarray:
@@ -145,8 +155,8 @@ def centered_surface_mesh(surface_path: Path, image_path: Path, angle_rad: float
 
 def render_surface(surface_path: Path, image_path: Path, angle_rad: float, depth_scale: float, render_side: int) -> np.ndarray:
     mesh = centered_surface_mesh(surface_path, image_path, angle_rad, depth_scale, render_side)
-    scene = pyrender.Scene(bg_color=[*BACKGROUND, 255], ambient_light=[0.18, 0.18, 0.18])
-    scene.add(pyrender.Mesh.from_trimesh(mesh, smooth=True))
+    scene = pyrender.Scene(bg_color=[*BACKGROUND, 255], ambient_light=[0.23, 0.23, 0.23])
+    scene.add(glossy_vertex_mesh(mesh))
 
     camera_pose = np.eye(4, dtype=np.float64)
     camera_pose[:3, 3] = [0.0, 0.0, 3.2]
