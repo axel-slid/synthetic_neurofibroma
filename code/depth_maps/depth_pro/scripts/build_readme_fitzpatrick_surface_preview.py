@@ -28,14 +28,60 @@ FITZPATRICK_PLOTLY_ROOT = (
     / "plotly"
     / "fitzpatrick_neurofibromatosis"
 )
-DEFAULT_SAMPLE_IDS = ("fitz_nf_0011", "fitz_nf_0037", "fitz_nf_0064")
+DEFAULT_SAMPLE_IDS = ("fitz_nf_0011", "fitz_nf_0003", "fitz_nf_0064")
 DEFAULT_OUTPUT = ROOT / "docs" / "assets" / "fitzpatrick_depthpro_surface_rotation.gif"
 OUTPUT_WIDTH = 868
 PANEL_WIDTH = (OUTPUT_WIDTH - 2 * 8) // 3
 PANEL_HEIGHT = 250
 PANEL_GAP = 8
 ROW_GAP = 6
+RENDER_SURFACE_SIDE = 160
 BACKGROUND = (244, 246, 249)
+
+
+def look_at_pose(eye: tuple[float, float, float], target: tuple[float, float, float] = (0.0, 0.0, 0.0)) -> np.ndarray:
+    eye_arr = np.asarray(eye, dtype=np.float64)
+    target_arr = np.asarray(target, dtype=np.float64)
+    forward = target_arr - eye_arr
+    forward /= np.linalg.norm(forward)
+    up = np.asarray([0.0, 1.0, 0.0], dtype=np.float64)
+    right = np.cross(forward, up)
+    if np.linalg.norm(right) < 1e-8:
+        up = np.asarray([1.0, 0.0, 0.0], dtype=np.float64)
+        right = np.cross(forward, up)
+    right /= np.linalg.norm(right)
+    true_up = np.cross(right, forward)
+
+    pose = np.eye(4, dtype=np.float64)
+    pose[:3, 0] = right
+    pose[:3, 1] = true_up
+    pose[:3, 2] = -forward
+    pose[:3, 3] = eye_arr
+    return pose
+
+
+def add_surface_lights(scene: pyrender.Scene) -> None:
+    for eye, intensity in (
+        ((-1.9, -1.7, 3.2), 0.72),
+        ((1.8, 1.2, 2.6), 0.18),
+        ((0.0, -2.6, 1.8), 0.14),
+    ):
+        scene.add(
+            pyrender.DirectionalLight(color=np.ones(3), intensity=intensity),
+            pose=look_at_pose(eye),
+        )
+
+
+def enhance_surface_colors(rgb: np.ndarray) -> np.ndarray:
+    values = rgb.astype(np.float32)
+    luminance = values @ np.asarray([0.2126, 0.7152, 0.0722], dtype=np.float32)
+    values = luminance[:, None] + 1.24 * (values - luminance[:, None])
+    center = values.mean(axis=0, keepdims=True)
+    values = center + 1.18 * (values - center)
+    mean_luminance = max(float(luminance.mean()), 1.0)
+    target_luminance = max(min(mean_luminance * 0.78, 165.0), 70.0)
+    values *= target_luminance / mean_luminance
+    return np.clip(values, 0, 255).astype(np.uint8)
 
 
 def rgba(rgb: np.ndarray) -> np.ndarray:
@@ -43,34 +89,69 @@ def rgba(rgb: np.ndarray) -> np.ndarray:
     return np.concatenate([rgb.astype(np.uint8), alpha], axis=1)
 
 
-def centered_surface_mesh(surface_path: Path, angle_rad: float, depth_scale: float) -> trimesh.Trimesh:
-    payload = np.load(surface_path)
-    vertices = payload["vertices"].astype(np.float32)
-    faces = payload["triangles"].astype(np.int32)
-    colors = payload["colors"].astype(np.uint8)
+def resize_float_grid(values: np.ndarray, side: int) -> np.ndarray:
+    image = Image.fromarray(values.astype(np.float32), mode="F")
+    return np.asarray(image.resize((side, side), Image.Resampling.BICUBIC), dtype=np.float32)
 
+
+def grid_triangles(side: int) -> np.ndarray:
+    faces: list[tuple[int, int, int]] = []
+    for row in range(side - 1):
+        for col in range(side - 1):
+            a = row * side + col
+            b = a + 1
+            c = a + side
+            d = c + 1
+            faces.append((a, b, c))
+            faces.append((b, d, c))
+    return np.asarray(faces, dtype=np.int32)
+
+
+def resampled_surface(surface_path: Path, image_path: Path, side: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    payload = np.load(surface_path)
+    source_vertices = payload["vertices"].astype(np.float32)
+    source_side = int(round(math.sqrt(len(source_vertices))))
+    if source_side * source_side != len(source_vertices):
+        raise ValueError(f"Expected square surface vertex count for {surface_path}, got {len(source_vertices)}")
+
+    z_grid = source_vertices[:, 2].reshape(source_side, source_side)
+    z_grid = resize_float_grid(z_grid, side)
+    x_min, y_min = np.nanmin(source_vertices[:, :2], axis=0)
+    x_max, y_max = np.nanmax(source_vertices[:, :2], axis=0)
+    x_grid, y_grid = np.meshgrid(
+        np.linspace(float(x_min), float(x_max), side, dtype=np.float32),
+        np.linspace(float(y_min), float(y_max), side, dtype=np.float32),
+    )
+    vertices = np.column_stack([x_grid.reshape(-1), y_grid.reshape(-1), z_grid.reshape(-1)]).astype(np.float32)
+    faces = grid_triangles(side)
+    colors = np.asarray(
+        Image.open(image_path).convert("RGB").resize((side, side), Image.Resampling.BICUBIC),
+        dtype=np.uint8,
+    ).reshape(-1, 3)
+    return vertices, faces, colors
+
+
+def centered_surface_mesh(surface_path: Path, image_path: Path, angle_rad: float, depth_scale: float, render_side: int) -> trimesh.Trimesh:
+    vertices, faces, colors = resampled_surface(surface_path, image_path, render_side)
     vertices = vertices - (vertices.min(axis=0) + vertices.max(axis=0)) / 2.0
     vertices[:, 1] *= -1.0
     vertices[:, 2] *= depth_scale
     faces = np.vstack([faces, faces[:, ::-1]])
 
-    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, vertex_colors=rgba(colors), process=False)
+    mesh = trimesh.Trimesh(vertices=vertices, faces=faces, vertex_colors=rgba(enhance_surface_colors(colors)), process=False)
     mesh.apply_transform(trimesh.transformations.rotation_matrix(angle_rad, [0.0, 1.0, 0.0]))
     return mesh
 
 
-def render_surface(surface_path: Path, angle_rad: float, depth_scale: float) -> np.ndarray:
-    mesh = centered_surface_mesh(surface_path, angle_rad, depth_scale)
-    scene = pyrender.Scene(bg_color=[*BACKGROUND, 255], ambient_light=[0.86, 0.86, 0.86])
+def render_surface(surface_path: Path, image_path: Path, angle_rad: float, depth_scale: float, render_side: int) -> np.ndarray:
+    mesh = centered_surface_mesh(surface_path, image_path, angle_rad, depth_scale, render_side)
+    scene = pyrender.Scene(bg_color=[*BACKGROUND, 255], ambient_light=[0.18, 0.18, 0.18])
     scene.add(pyrender.Mesh.from_trimesh(mesh, smooth=True))
 
     camera_pose = np.eye(4, dtype=np.float64)
     camera_pose[:3, 3] = [0.0, 0.0, 3.2]
     scene.add(pyrender.PerspectiveCamera(yfov=math.radians(36.0), znear=0.01, zfar=10.0), pose=camera_pose)
-
-    light_pose = np.eye(4, dtype=np.float64)
-    light_pose[:3, 3] = [0.0, -1.0, 3.0]
-    scene.add(pyrender.DirectionalLight(color=np.ones(3), intensity=2.4), pose=light_pose)
+    add_surface_lights(scene)
 
     renderer = pyrender.OffscreenRenderer(viewport_width=PANEL_WIDTH, viewport_height=PANEL_HEIGHT)
     try:
@@ -127,11 +208,12 @@ def build_gif(
     fps: int,
     depth_scale: float,
     front_yaw_degrees: float,
+    render_side: int,
 ) -> None:
     if not sample_ids:
         raise ValueError("At least one Fitzpatrick sample ID is required")
 
-    samples: list[tuple[Image.Image, Image.Image, Path]] = []
+    samples: list[tuple[Image.Image, Image.Image, Path, Path]] = []
     for sample_id in sample_ids:
         image_path = FITZPATRICK_PLOTLY_ROOT / "images" / f"{sample_id}.jpg"
         surface_path = FITZPATRICK_PLOTLY_ROOT / "surfaces" / f"{sample_id}_depthpro_surface_64.npz"
@@ -139,15 +221,15 @@ def build_gif(
             raise FileNotFoundError(f"Missing Fitzpatrick image: {image_path}")
         if not surface_path.exists():
             raise FileNotFoundError(f"Missing Fitzpatrick surface: {surface_path}")
-        samples.append((original_image_panel(image_path), depth_panel(surface_path), surface_path))
+        samples.append((original_image_panel(image_path), depth_panel(surface_path), surface_path, image_path))
 
     images = []
     yaw_rad = math.radians(front_yaw_degrees)
     for frame_index in range(frames):
         angle = yaw_rad * math.sin(2.0 * math.pi * frame_index / frames)
         rows = []
-        for original_panel, depth_map_panel, surface_path in samples:
-            surface_rgb = render_surface(surface_path, angle, depth_scale)
+        for original_panel, depth_map_panel, surface_path, image_path in samples:
+            surface_rgb = render_surface(surface_path, image_path, angle, depth_scale, render_side)
             rows.append(build_row(original_panel, depth_map_panel, surface_rgb))
         images.append(build_frame(rows))
 
@@ -171,6 +253,7 @@ def main() -> None:
     parser.add_argument("--fps", type=int, default=4)
     parser.add_argument("--depth-scale", type=float, default=0.85)
     parser.add_argument("--front-yaw-degrees", type=float, default=14.0)
+    parser.add_argument("--render-side", type=int, default=RENDER_SURFACE_SIDE)
     args = parser.parse_args()
 
     if args.sample_ids:
@@ -180,7 +263,7 @@ def main() -> None:
     else:
         sample_ids = DEFAULT_SAMPLE_IDS
 
-    build_gif(sample_ids, args.output, args.frames, args.fps, args.depth_scale, args.front_yaw_degrees)
+    build_gif(sample_ids, args.output, args.frames, args.fps, args.depth_scale, args.front_yaw_degrees, args.render_side)
     print(f"Wrote {root_relative(args.output)}")
 
 
