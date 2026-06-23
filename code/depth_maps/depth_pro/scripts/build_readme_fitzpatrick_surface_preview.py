@@ -15,7 +15,7 @@ from matplotlib import colormaps
 import numpy as np
 import pyrender
 import trimesh
-from PIL import Image, ImageOps
+from PIL import Image, ImageEnhance, ImageOps
 
 ROOT = Path(__file__).resolve().parents[4]
 FITZPATRICK_PLOTLY_ROOT = (
@@ -61,14 +61,14 @@ def look_at_pose(eye: tuple[float, float, float], target: tuple[float, float, fl
 
 
 def add_surface_lights(scene: pyrender.Scene) -> None:
-    for eye, intensity in (
-        ((-1.9, -1.7, 3.2), 0.84),
-        ((0.25, -0.35, 3.2), 0.34),
-        ((1.8, 1.2, 2.6), 0.20),
-        ((0.0, -2.6, 1.8), 0.14),
+    for eye, intensity, color in (
+        ((-1.9, -1.7, 3.2), 0.84, (1.00, 0.96, 0.90)),
+        ((0.25, -0.35, 3.2), 0.28, (1.00, 0.97, 0.92)),
+        ((1.8, 1.2, 2.6), 0.20, (0.96, 0.98, 1.00)),
+        ((0.0, -2.6, 1.8), 0.14, (1.00, 0.96, 0.90)),
     ):
         scene.add(
-            pyrender.DirectionalLight(color=np.ones(3), intensity=intensity),
+            pyrender.DirectionalLight(color=np.asarray(color), intensity=intensity),
             pose=look_at_pose(eye),
         )
 
@@ -76,11 +76,11 @@ def add_surface_lights(scene: pyrender.Scene) -> None:
 def enhance_surface_colors(rgb: np.ndarray) -> np.ndarray:
     values = rgb.astype(np.float32)
     luminance = values @ np.asarray([0.2126, 0.7152, 0.0722], dtype=np.float32)
-    values = luminance[:, None] + 1.10 * (values - luminance[:, None])
+    values = luminance[:, None] + 1.26 * (values - luminance[:, None])
     center = values.mean(axis=0, keepdims=True)
-    values = center + 1.08 * (values - center)
+    values = center + 1.10 * (values - center)
     mean_luminance = max(float(luminance.mean()), 1.0)
-    target_luminance = max(min(mean_luminance * 0.90, 182.0), 78.0)
+    target_luminance = max(min(mean_luminance * 0.92, 186.0), 78.0)
     values *= target_luminance / mean_luminance
     return np.clip(values, 0, 255).astype(np.uint8)
 
@@ -89,9 +89,16 @@ def glossy_vertex_mesh(mesh: trimesh.Trimesh) -> pyrender.Mesh:
     render_mesh = pyrender.Mesh.from_trimesh(mesh, smooth=True)
     for primitive in render_mesh.primitives:
         primitive.material.metallicFactor = 0.0
-        primitive.material.roughnessFactor = 0.28
+        primitive.material.roughnessFactor = 0.34
         primitive.material.baseColorFactor = [1.0, 1.0, 1.0, 1.0]
     return render_mesh
+
+
+def restore_rendered_color(rgb: np.ndarray) -> np.ndarray:
+    image = Image.fromarray(rgb[:, :, :3]).convert("RGB")
+    image = ImageEnhance.Color(image).enhance(1.18)
+    image = ImageEnhance.Contrast(image).enhance(1.03)
+    return np.asarray(image, dtype=np.uint8)
 
 
 def rgba(rgb: np.ndarray) -> np.ndarray:
@@ -168,7 +175,7 @@ def render_surface(surface_path: Path, image_path: Path, angle_rad: float, depth
         color, _depth = renderer.render(scene, flags=pyrender.RenderFlags.RGBA)
     finally:
         renderer.delete()
-    return color[:, :, :3]
+    return restore_rendered_color(color[:, :, :3])
 
 
 def original_image_panel(image_path: Path) -> Image.Image:
