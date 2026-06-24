@@ -13,15 +13,16 @@ python -m pip install -e ".[volume]"
 ## Python
 
 ```python
+import json
 from synthetic_nf import LesionVolumePipeline
+
+with open("sample_data/lesion_volume_sample/lesions.json") as f:
+    sample = json.load(f)
 
 result = LesionVolumePipeline().compute_volume(
     image_path="sample_data/lesion_volume_sample/sample_lesions.png",
-    lesions=[
-        {"points": [[247, 184], [241, 205], [226, 220], [205, 226], [184, 220], [169, 205], [163, 184], [169, 163], [184, 148], [205, 142], [226, 148], [241, 163]]},
-        {"points": [[357, 230], [353, 246], [342, 257], [326, 261], [310, 257], [299, 246], [295, 230], [299, 214], [310, 203], [326, 199], [342, 203], [353, 214]]},
-    ],
-    scale_points=((48, 48), (128, 48)),
+    lesions=sample["lesions"],
+    scale_points=sample["scale_points"],
     generate_visuals=True,
 )
 
@@ -37,6 +38,16 @@ synthetic-nf-volume \
   --output-dir outputs/sample_volume \
   --visual gif \
   --visual montage
+```
+
+## Table Sample
+
+```bash
+python examples/run_sample_table.py
+```
+
+```text
+image_path,ai_cnf_points,ai_cnf_contours,sensitivity_cnf_points,ai_cnf_stage,ruler_location,ruler_distance_cm,lesion_id
 ```
 
 ## Outputs

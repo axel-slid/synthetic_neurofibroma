@@ -7,6 +7,7 @@ import math
 import subprocess
 import sys
 import warnings
+import ast
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
@@ -74,6 +75,7 @@ class LesionVolumePipeline:
         ring_width_px: int | None = None,
         max_height_cm: float | None = None,
         depth_override_m: np.ndarray | None = None,
+        show_progress: bool = True,
     ) -> LesionVolumeResult:
         """Run the lesion volume pipeline.
 
@@ -94,6 +96,7 @@ class LesionVolumePipeline:
             max_height_cm: Optional clip for integrated relief height.
             depth_override_m: Optional depth map in meters for tests or callers
                 that already ran Depth Pro.
+            show_progress: Show a tqdm progress bar for major pipeline stages.
         """
 
         image_path = Path(image_path).expanduser().resolve()
@@ -110,93 +113,6 @@ class LesionVolumePipeline:
         pixels_per_cm = _pixels_per_cm(scale_pair)
         pixel_area_cm2 = 1.0 / (pixels_per_cm * pixels_per_cm)
 
-        lesion_specs = [_parse_lesion_spec(lesion, idx, point_radius_px) for idx, lesion in enumerate(lesions, start=1)]
-        if not lesion_specs:
-            raise ValueError("At least one lesion outline or lesion center is required.")
-
-        masks: list[np.ndarray] = []
-        for spec in lesion_specs:
-            mask = _mask_from_spec(spec, width, height)
-            if int(mask.sum()) == 0:
-                raise ValueError(f"Lesion {spec['id']} produced an empty mask.")
-            masks.append(mask)
-
-        union_mask = np.zeros((height, width), dtype=bool)
-        for mask in masks:
-            union_mask |= mask
-
-        warnings_list: list[str] = []
-        if depth_override_m is None:
-            depth_m = self._predict_depth_m(image)
-        else:
-            depth_m = np.asarray(depth_override_m, dtype=np.float32)
-            if depth_m.ndim != 2:
-                raise ValueError("depth_override_m must be a 2D array in meters.")
-            if depth_m.shape != (height, width):
-                depth_m = _resize_depth_nearest(depth_m, (width, height))
-
-        depth_m = np.nan_to_num(depth_m.astype(np.float32), nan=np.nanmedian(depth_m), posinf=np.nanmedian(depth_m), neginf=np.nanmedian(depth_m))
-        depth_path = output_root / f"{image_path.stem}_depth_m.npy"
-        np.save(depth_path, depth_m)
-
-        mask_dir = output_root / "masks"
-        mask_dir.mkdir(exist_ok=True)
-        lesion_rows: list[dict[str, Any]] = []
-        for spec, mask in zip(lesion_specs, masks):
-            width_px = ring_width_px or max(8, min(48, int(round(math.sqrt(float(mask.sum())) * 0.65))))
-            ring = _ring_mask(mask, union_mask, width_px)
-            if int(ring.sum()) < 24:
-                wider_ring = _ring_mask(mask, union_mask, width_px * 2)
-                if int(wider_ring.sum()) >= 24:
-                    ring = wider_ring
-            if int(ring.sum()) < 3:
-                raise ValueError(f"Lesion {spec['id']} does not have enough nearby background pixels for plane fitting.")
-
-            surface_m = _fit_plane_surface(depth_m, ring)
-            deviation_m = depth_m - surface_m
-            target_deviation_m = deviation_m[mask]
-            direction = -1.0 if float(np.nanmedian(target_deviation_m)) < 0 else 1.0
-            height_cm = np.maximum(direction * target_deviation_m, 0.0) * 100.0
-            if max_height_cm is not None:
-                height_cm = np.minimum(height_cm, float(max_height_cm))
-
-            volume_cm3 = float(height_cm.sum() * pixel_area_cm2)
-            area_px = int(mask.sum())
-            row = {
-                "lesion_id": spec["id"],
-                "name": spec["name"],
-                "area_px": area_px,
-                "area_cm2": float(area_px * pixel_area_cm2),
-                "median_height_cm": float(np.nanmedian(height_cm)) if height_cm.size else 0.0,
-                "mean_height_cm": float(np.nanmean(height_cm)) if height_cm.size else 0.0,
-                "max_height_cm": float(np.nanmax(height_cm)) if height_cm.size else 0.0,
-                "volume_cm3": volume_cm3,
-                "relief_direction": "toward_camera" if direction < 0 else "away_from_camera",
-                "ring_px": int(ring.sum()),
-            }
-            lesion_rows.append(row)
-
-            mask_path = mask_dir / f"{image_path.stem}_{spec['id']}_mask.png"
-            Image.fromarray((mask.astype(np.uint8) * 255), mode="L").save(mask_path)
-
-        union_path = mask_dir / f"{image_path.stem}_lesion_union_mask.png"
-        Image.fromarray((union_mask.astype(np.uint8) * 255), mode="L").save(union_path)
-
-        csv_path = output_root / "lesion_volumes_cm3.csv"
-        _write_csv(csv_path, lesion_rows, pixels_per_cm)
-
-        outputs: dict[str, str] = {
-            "depth_npy": str(depth_path),
-            "lesion_csv": str(csv_path),
-            "union_mask": str(union_path),
-        }
-
-        visual_root = output_root / "visualizations"
-        visual_root.mkdir(exist_ok=True)
-        depth_vis_path = visual_root / f"{image_path.stem}_depth.png"
-        _depth_visual(depth_m).save(depth_vis_path)
-        outputs["depth_png"] = str(depth_vis_path)
-
         requested_visuals = set(visuals or [])
         if generate_visuals and not requested_visuals:
             requested_visuals = {"gif", "montage"}
@@ -205,19 +121,118 @@ class LesionVolumePipeline:
         if unknown_visuals:
             raise ValueError(f"Unknown visual output(s): {sorted(unknown_visuals)}")
 
-        if requested_visuals:
-            visual_outputs, visual_warnings = _write_visuals(
-                image=image,
-                depth_m=depth_m,
-                union_mask=union_mask,
-                lesion_specs=lesion_specs,
-                scale_points=scale_pair,
-                output_root=visual_root,
-                image_stem=image_path.stem,
-                requested=requested_visuals,
-            )
-            outputs.update(visual_outputs)
-            warnings_list.extend(visual_warnings)
+        lesion_specs = [_parse_lesion_spec(lesion, idx, point_radius_px) for idx, lesion in enumerate(lesions, start=1)]
+        if not lesion_specs:
+            raise ValueError("At least one lesion outline or lesion center is required.")
+
+        progress = _make_progress(show_progress, total=4 + len(lesion_specs), desc="lesion volume")
+        with progress as bar:
+            bar.set_description("Build lesion masks")
+            masks: list[np.ndarray] = []
+            for spec in lesion_specs:
+                mask = _mask_from_spec(spec, width, height)
+                if int(mask.sum()) == 0:
+                    raise ValueError(f"Lesion {spec['id']} produced an empty mask.")
+                masks.append(mask)
+
+            union_mask = np.zeros((height, width), dtype=bool)
+            for mask in masks:
+                union_mask |= mask
+            bar.update(1)
+
+            warnings_list: list[str] = []
+            bar.set_description("Predict depth")
+            if depth_override_m is None:
+                depth_m = self._predict_depth_m(image)
+            else:
+                depth_m = np.asarray(depth_override_m, dtype=np.float32)
+                if depth_m.ndim != 2:
+                    raise ValueError("depth_override_m must be a 2D array in meters.")
+                if depth_m.shape != (height, width):
+                    depth_m = _resize_depth_nearest(depth_m, (width, height))
+            bar.update(1)
+
+            depth_m = np.nan_to_num(depth_m.astype(np.float32), nan=np.nanmedian(depth_m), posinf=np.nanmedian(depth_m), neginf=np.nanmedian(depth_m))
+            depth_path = output_root / f"{image_path.stem}_depth_m.npy"
+            np.save(depth_path, depth_m)
+
+            mask_dir = output_root / "masks"
+            mask_dir.mkdir(exist_ok=True)
+            lesion_rows: list[dict[str, Any]] = []
+            for spec, mask in zip(lesion_specs, masks):
+                bar.set_description(f"Measure {spec['id']}")
+                width_px = ring_width_px or max(8, min(48, int(round(math.sqrt(float(mask.sum())) * 0.65))))
+                ring = _ring_mask(mask, union_mask, width_px)
+                if int(ring.sum()) < 24:
+                    wider_ring = _ring_mask(mask, union_mask, width_px * 2)
+                    if int(wider_ring.sum()) >= 24:
+                        ring = wider_ring
+                if int(ring.sum()) < 3:
+                    raise ValueError(f"Lesion {spec['id']} does not have enough nearby background pixels for plane fitting.")
+
+                surface_m = _fit_plane_surface(depth_m, ring)
+                deviation_m = depth_m - surface_m
+                target_deviation_m = deviation_m[mask]
+                direction = -1.0 if float(np.nanmedian(target_deviation_m)) < 0 else 1.0
+                height_cm = np.maximum(direction * target_deviation_m, 0.0) * 100.0
+                if max_height_cm is not None:
+                    height_cm = np.minimum(height_cm, float(max_height_cm))
+
+                volume_cm3 = float(height_cm.sum() * pixel_area_cm2)
+                area_px = int(mask.sum())
+                row = {
+                    "lesion_id": spec["id"],
+                    "name": spec["name"],
+                    "area_px": area_px,
+                    "area_cm2": float(area_px * pixel_area_cm2),
+                    "median_height_cm": float(np.nanmedian(height_cm)) if height_cm.size else 0.0,
+                    "mean_height_cm": float(np.nanmean(height_cm)) if height_cm.size else 0.0,
+                    "max_height_cm": float(np.nanmax(height_cm)) if height_cm.size else 0.0,
+                    "volume_cm3": volume_cm3,
+                    "relief_direction": "toward_camera" if direction < 0 else "away_from_camera",
+                    "ring_px": int(ring.sum()),
+                }
+                lesion_rows.append(row)
+
+                mask_path = mask_dir / f"{image_path.stem}_{spec['id']}_mask.png"
+                Image.fromarray((mask.astype(np.uint8) * 255), mode="L").save(mask_path)
+                bar.update(1)
+
+            bar.set_description("Write outputs")
+            union_path = mask_dir / f"{image_path.stem}_lesion_union_mask.png"
+            Image.fromarray((union_mask.astype(np.uint8) * 255), mode="L").save(union_path)
+
+            csv_path = output_root / "lesion_volumes_cm3.csv"
+            _write_csv(csv_path, lesion_rows, pixels_per_cm)
+
+            outputs: dict[str, str] = {
+                "depth_npy": str(depth_path),
+                "lesion_csv": str(csv_path),
+                "union_mask": str(union_path),
+            }
+
+            visual_root = output_root / "visualizations"
+            visual_root.mkdir(exist_ok=True)
+            depth_vis_path = visual_root / f"{image_path.stem}_depth.png"
+            _depth_visual(depth_m).save(depth_vis_path)
+            outputs["depth_png"] = str(depth_vis_path)
+            bar.update(1)
+
+            bar.set_description("Write visualizations")
+            if requested_visuals:
+                visual_outputs, visual_warnings = _write_visuals(
+                    image=image,
+                    depth_m=depth_m,
+                    union_mask=union_mask,
+                    lesion_specs=lesion_specs,
+                    scale_points=scale_pair,
+                    output_root=visual_root,
+                    image_stem=image_path.stem,
+                    requested=requested_visuals,
+                )
+                outputs.update(visual_outputs)
+                warnings_list.extend(visual_warnings)
+            bar.update(1)
 
         summary = {
             "image_path": str(image_path),
@@ -241,6 +256,62 @@ class LesionVolumePipeline:
             outputs=outputs,
             warnings=warnings_list,
         )
+
+    def compute_from_table(
+        self,
+        annotations_csv: str | Path,
+        output_dir: str | Path | None = None,
+        image_root: str | Path | None = None,
+        generate_visuals: bool = False,
+        visuals: Iterable[str] | None = None,
+        show_progress: bool = True,
+        **compute_kwargs: Any,
+    ) -> list[LesionVolumeResult]:
+        """Compute volumes from the expected tabular annotation schema.
+
+        Required columns are ``image_path``, ``ai_cnf_contours``,
+        ``ruler_location``, ``ruler_distance_cm``, and ``lesion_id``.
+        ``ruler_location`` is two image coordinates whose real-world length is
+        ``ruler_distance_cm``.
+        """
+
+        annotations_path = Path(annotations_csv).expanduser().resolve()
+        rows = _read_annotation_table(annotations_path)
+        if not rows:
+            raise ValueError(f"No annotation rows found in {annotations_path}")
+
+        grouped: dict[str, list[dict[str, str]]] = {}
+        for row in rows:
+            image_key = row.get("image_path", "").strip()
+            if not image_key:
+                raise ValueError("Every annotation row must include image_path.")
+            grouped.setdefault(image_key, []).append(row)
+
+        base_output = Path(output_dir).expanduser().resolve() if output_dir else None
+        root = Path(image_root).expanduser().resolve() if image_root else annotations_path.parent
+        results: list[LesionVolumeResult] = []
+
+        for image_key, image_rows in grouped.items():
+            image_path = _resolve_table_image_path(image_key, root)
+            scale_points = _scale_points_from_table_row(image_rows[0])
+            lesions = [_lesion_from_table_row(row, idx) for idx, row in enumerate(image_rows, start=1)]
+            if base_output is None or len(grouped) == 1:
+                image_output = base_output
+            else:
+                image_output = base_output / image_path.stem
+            results.append(
+                self.compute_volume(
+                    image_path=image_path,
+                    lesions=lesions,
+                    scale_points=scale_points,
+                    output_dir=image_output,
+                    generate_visuals=generate_visuals,
+                    visuals=visuals,
+                    show_progress=show_progress,
+                    **compute_kwargs,
+                )
+            )
+        return results
 
     def _predict_depth_m(self, image: Image.Image) -> np.ndarray:
         self._ensure_depthpro_dependencies()
@@ -407,6 +478,92 @@ def _select_device(torch: Any, requested: str) -> str:
     if requested == "auto":
         return "cuda" if torch.cuda.is_available() else "cpu"
     return requested
+
+
+def _read_annotation_table(path: Path) -> list[dict[str, str]]:
+    with path.open("r", newline="", encoding="utf-8") as handle:
+        return [dict(row) for row in csv.DictReader(handle)]
+
+
+def _resolve_table_image_path(image_key: str, image_root: Path) -> Path:
+    image_path = Path(image_key).expanduser()
+    if not image_path.is_absolute():
+        image_path = image_root / image_path
+    return image_path.resolve()
+
+
+def _scale_points_from_table_row(row: Mapping[str, str]) -> ScalePoints:
+    if _missing(row.get("ruler_location")):
+        raise ValueError("ruler_location is required and must contain two [x, y] coordinates.")
+    ruler = np.asarray(_parse_table_literal(row["ruler_location"]), dtype=float)
+    if ruler.shape != (2, 2):
+        raise ValueError("ruler_location must be [[x1, y1], [x2, y2]].")
+    distance_cm = float(row.get("ruler_distance_cm") or 1.0)
+    if distance_cm <= 0:
+        raise ValueError("ruler_distance_cm must be greater than zero.")
+    x1, y1 = ruler[0]
+    x2, y2 = ruler[1]
+    return ((float(x1), float(y1)), (float(x1 + (x2 - x1) / distance_cm), float(y1 + (y2 - y1) / distance_cm)))
+
+
+def _lesion_from_table_row(row: Mapping[str, str], index: int) -> dict[str, Any]:
+    lesion_id = str(row.get("lesion_id") or f"lesion_{index:03d}")
+    if not _missing(row.get("ai_cnf_contours")):
+        points = _polygon_from_table_value(row["ai_cnf_contours"])
+        return {"id": lesion_id, "name": lesion_id, "points": points}
+    if not _missing(row.get("ai_cnf_points")):
+        center = _parse_table_literal(row["ai_cnf_points"])
+        return {"id": lesion_id, "name": lesion_id, "center": center}
+    raise ValueError(f"Row {index} must include ai_cnf_contours or ai_cnf_points.")
+
+
+def _polygon_from_table_value(value: str) -> list[list[float]]:
+    parsed = _parse_table_literal(value)
+    arr = np.asarray(parsed, dtype=float)
+    if arr.ndim == 3:
+        arr = max(arr, key=lambda contour: len(contour))
+        arr = np.asarray(arr, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] != 2 or arr.shape[0] < 3:
+        raise ValueError("ai_cnf_contours must be a polygon like [[x, y], [x, y], ...].")
+    return [[float(x), float(y)] for x, y in arr]
+
+
+def _parse_table_literal(value: str) -> Any:
+    text = value.strip()
+    if not text:
+        raise ValueError("Cannot parse an empty table value.")
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return ast.literal_eval(text)
+
+
+def _missing(value: Any) -> bool:
+    return value is None or str(value).strip() in {"", "nan", "NaN", "None", "null"}
+
+
+class _NoopProgress:
+    def __enter__(self) -> "_NoopProgress":
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        return None
+
+    def set_description(self, _description: str) -> None:
+        return None
+
+    def update(self, _count: int = 1) -> None:
+        return None
+
+
+def _make_progress(enabled: bool, total: int, desc: str) -> Any:
+    if not enabled:
+        return _NoopProgress()
+    try:
+        from tqdm.auto import tqdm
+    except ImportError:
+        return _NoopProgress()
+    return tqdm(total=total, desc=desc, unit="step")
 
 
 def _write_csv(path: Path, rows: list[dict[str, Any]], pixels_per_cm: float) -> None:

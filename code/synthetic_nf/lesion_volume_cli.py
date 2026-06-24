@@ -43,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Fail instead of installing missing torch/transformers dependencies.",
     )
+    parser.add_argument("--quiet", action="store_true", help="Disable tqdm progress output.")
     args = parser.parse_args(argv)
 
     payload = _load_json_arg(args.lesions_json)
@@ -77,6 +78,7 @@ def main(argv: list[str] | None = None) -> int:
         output_dir=args.output_dir,
         generate_visuals=bool(visuals),
         visuals=visuals,
+        show_progress=not args.quiet,
     )
     json.dump(result.to_dict(), sys.stdout, indent=2)
     sys.stdout.write("\n")
