@@ -7,6 +7,21 @@ name = "synthetic-nf"
 version = "0.1.0"
 description = "Synthetic neurofibroma data generation and depth-map experiments."
 requires-python = ">=3.10"
+dependencies = [
+  "imageio>=2.31",
+  "numpy>=1.24",
+  "Pillow>=10",
+]
+
+[project.optional-dependencies]
+volume = [
+  "imageio-ffmpeg>=0.4",
+  "torch",
+  "transformers>=4.40",
+]
+
+[project.scripts]
+synthetic-nf-volume = "synthetic_nf.lesion_volume_cli:main"
 
 [tool.setuptools.packages.find]
 where = ["code"]
