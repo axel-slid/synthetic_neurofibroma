@@ -1,7 +1,5 @@
 # Synthetic Neurofibroma
 
-![Lesion volume heatmap montage](code/pipeline/visualizations/plots/added_polygons_largest_diameter_3cm_per_image_heatmaps_exports/per_quadrant_cm3_new_stacked_gif_all_five_patients.gif)
-
 GitHub: <https://github.com/axel-slid/synthetic_neurofibroma>
 
 ## Install
