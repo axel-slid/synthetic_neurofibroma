@@ -41,6 +41,8 @@ python examples/run_sample_table.py
 image_path,ai_cnf_points,ai_cnf_contours,sensitivity_cnf_points,ai_cnf_stage,ruler_location,ruler_distance_cm,lesion_id
 ```
 
+`sample_annotations.csv` has 519 real lesion rows for the sample image; the ruler scale is fake.
+
 ## Outputs
 
 ```text
