@@ -191,7 +191,9 @@ class LesionVolumePipeline:
             "union_mask": str(union_path),
         }
 
-        depth_vis_path = output_root / f"{image_path.stem}_depth.png"
+        visual_root = output_root / "visualizations"
+        visual_root.mkdir(exist_ok=True)
+        depth_vis_path = visual_root / f"{image_path.stem}_depth.png"
         _depth_visual(depth_m).save(depth_vis_path)
         outputs["depth_png"] = str(depth_vis_path)
 
@@ -210,7 +212,7 @@ class LesionVolumePipeline:
                 union_mask=union_mask,
                 lesion_specs=lesion_specs,
                 scale_points=scale_pair,
-                output_root=output_root,
+                output_root=visual_root,
                 image_stem=image_path.stem,
                 requested=requested_visuals,
             )

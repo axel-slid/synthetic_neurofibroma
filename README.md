@@ -46,10 +46,11 @@ outputs/sample_volume/
   lesion_volumes_cm3.csv
   summary.json
   sample_lesions_depth_m.npy
-  sample_lesions_depth.png
   masks/
-  sample_lesions_lesion_volume.gif
-  sample_lesions_lesion_volume_montage.png
+  visualizations/
+    sample_lesions_depth.png
+    sample_lesions_lesion_volume.gif
+    sample_lesions_lesion_volume_montage.png
 ```
 
 ![Lesion volume heatmap montage](code/pipeline/visualizations/plots/added_polygons_largest_diameter_3cm_per_image_heatmaps_exports/per_quadrant_cm3_new_stacked_gif_all_five_patients.gif)
