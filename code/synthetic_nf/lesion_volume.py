@@ -257,6 +257,48 @@ class LesionVolumePipeline:
             warnings=warnings_list,
         )
 
+    def compute_from_json(
+        self,
+        lesions_json: str | Path,
+        image_path: str | Path | None = None,
+        scale_points: Sequence[Sequence[float]] | None = None,
+        output_dir: str | Path | None = None,
+        generate_visuals: bool = False,
+        visuals: Iterable[str] | None = None,
+        show_progress: bool = True,
+        **compute_kwargs: Any,
+    ) -> LesionVolumeResult:
+        """Compute volume from a JSON file that stores image, lesions, and scale."""
+
+        json_path = Path(lesions_json).expanduser().resolve()
+        payload = json.loads(json_path.read_text(encoding="utf-8"))
+        if not isinstance(payload, Mapping):
+            raise ValueError("lesions_json must be an object with lesions and scale_points.")
+
+        lesions = payload.get("lesions")
+        if not lesions:
+            raise ValueError("lesions_json must include a non-empty lesions list.")
+
+        selected_scale_points = scale_points if scale_points is not None else payload.get("scale_points")
+        if selected_scale_points is None:
+            raise ValueError("scale_points must be provided in the JSON or as an override.")
+
+        selected_image_path = image_path if image_path is not None else payload.get("image_path")
+        if selected_image_path is None:
+            raise ValueError("image_path must be provided in the JSON or as an override.")
+        selected_image_path = _resolve_json_image_path(selected_image_path, json_path.parent)
+
+        return self.compute_volume(
+            image_path=selected_image_path,
+            lesions=lesions,
+            scale_points=selected_scale_points,
+            output_dir=output_dir,
+            generate_visuals=generate_visuals,
+            visuals=visuals,
+            show_progress=show_progress,
+            **compute_kwargs,
+        )
+
     def compute_from_table(
         self,
         annotations_csv: str | Path,
@@ -489,6 +531,13 @@ def _resolve_table_image_path(image_key: str, image_root: Path) -> Path:
     image_path = Path(image_key).expanduser()
     if not image_path.is_absolute():
         image_path = image_root / image_path
+    return image_path.resolve()
+
+
+def _resolve_json_image_path(image_key: str | Path, json_root: Path) -> Path:
+    image_path = Path(image_key).expanduser()
+    if not image_path.is_absolute():
+        image_path = json_root / image_path
     return image_path.resolve()
 
 

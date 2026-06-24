@@ -13,18 +13,9 @@ python -m pip install -e ".[volume]"
 ## Python
 
 ```python
-import json
 from synthetic_nf import LesionVolumePipeline
 
-with open("sample_data/lesion_volume_sample/lesions.json") as f:
-    sample = json.load(f)
-
-result = LesionVolumePipeline().compute_volume(
-    image_path="sample_data/lesion_volume_sample/sample_lesions.png",
-    lesions=sample["lesions"],
-    scale_points=sample["scale_points"],
-    generate_visuals=True,
-)
+result = LesionVolumePipeline().compute_from_json("sample_data/lesion_volume_sample/lesions.json", generate_visuals=True)
 
 print(result.total_volume_cm3)
 ```
