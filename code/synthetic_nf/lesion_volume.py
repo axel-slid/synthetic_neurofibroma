@@ -76,6 +76,7 @@ class LesionVolumePipeline:
         max_height_cm: float | None = None,
         depth_override_m: np.ndarray | None = None,
         show_progress: bool = True,
+        visual_ruler_count: int = 0,
     ) -> LesionVolumeResult:
         """Run the lesion volume pipeline.
 
@@ -97,6 +98,8 @@ class LesionVolumePipeline:
             depth_override_m: Optional depth map in meters for tests or callers
                 that already ran Depth Pro.
             show_progress: Show a tqdm progress bar for major pipeline stages.
+            visual_ruler_count: Number of one-centimeter ruler markers to draw
+                on the visual depth panel. ``0`` preserves the no-ruler style.
         """
 
         image_path = Path(image_path).expanduser().resolve()
@@ -120,6 +123,7 @@ class LesionVolumePipeline:
         unknown_visuals = requested_visuals - {"gif", "png", "montage", "mov"}
         if unknown_visuals:
             raise ValueError(f"Unknown visual output(s): {sorted(unknown_visuals)}")
+        visual_ruler_count = _validate_ruler_count(visual_ruler_count)
 
         lesion_specs = [_parse_lesion_spec(lesion, idx, point_radius_px) for idx, lesion in enumerate(lesions, start=1)]
         if not lesion_specs:
@@ -229,6 +233,8 @@ class LesionVolumePipeline:
                     image_stem=image_path.stem,
                     requested=requested_visuals,
                     show_progress=show_progress,
+                    pixels_per_cm=pixels_per_cm,
+                    ruler_count=visual_ruler_count,
                 )
                 outputs.update(visual_outputs)
                 warnings_list.extend(visual_warnings)
@@ -449,6 +455,15 @@ def _pixels_per_cm(scale_points: ScalePoints) -> float:
     if distance <= 0:
         raise ValueError("The two scale coordinates must be different points.")
     return float(distance)
+
+
+def _validate_ruler_count(value: int) -> int:
+    count = int(value)
+    if count < 0:
+        raise ValueError("visual_ruler_count must be greater than or equal to 0.")
+    if count > 64:
+        raise ValueError("visual_ruler_count must be 64 or fewer markers.")
+    return count
 
 
 def _parse_lesion_spec(lesion: Any, index: int, point_radius_px: int) -> dict[str, Any]:
@@ -765,6 +780,58 @@ def _fit_visual_panel(image: Image.Image) -> Image.Image:
     return panel
 
 
+def _visual_panel_geometry(image_size: tuple[int, int]) -> tuple[float, int, int, int, int]:
+    image_w, image_h = image_size
+    scale = min(_PANEL_W / max(image_w, 1), _PANEL_H / max(image_h, 1))
+    fitted_w = int(round(image_w * scale))
+    fitted_h = int(round(image_h * scale))
+    offset_x = (_PANEL_W - fitted_w) // 2
+    offset_y = (_PANEL_H - fitted_h) // 2
+    return scale, offset_x, offset_y, fitted_w, fitted_h
+
+
+def _draw_visual_rulers(
+    panel: Image.Image,
+    image_size: tuple[int, int],
+    pixels_per_cm: float,
+    ruler_count: int,
+) -> Image.Image:
+    if ruler_count <= 0:
+        return panel
+
+    scale, offset_x, offset_y, fitted_w, fitted_h = _visual_panel_geometry(image_size)
+    ruler_px = max(1, int(round(float(pixels_per_cm) * scale)))
+    cols = int(math.ceil(math.sqrt(ruler_count)))
+    rows = int(math.ceil(ruler_count / max(cols, 1)))
+
+    panel = panel.copy()
+    draw = ImageDraw.Draw(panel, "RGBA")
+    white = (255, 255, 255, 255)
+    shadow = (0, 0, 0, 210)
+    line_width = 3 if ruler_px >= 14 else 2
+    shadow_width = line_width + 2
+    cap_half = 10 if ruler_px >= 14 else 8
+
+    marker_index = 0
+    for row in range(rows):
+        remaining = ruler_count - marker_index
+        row_count = min(cols, remaining)
+        if row_count <= 0:
+            break
+        center_y = int(round(offset_y + fitted_h * (row + 1) / (rows + 1)))
+        for col in range(row_count):
+            center_x = int(round(offset_x + fitted_w * (col + 1) / (row_count + 1)))
+            x0 = int(round(center_x - ruler_px / 2))
+            x1 = int(round(center_x + ruler_px / 2))
+            draw.line((x0, center_y, x1, center_y), fill=shadow, width=shadow_width)
+            draw.line((x0, center_y, x1, center_y), fill=white, width=line_width)
+            for x in (x0, x1):
+                draw.line((x, center_y - cap_half, x, center_y + cap_half), fill=shadow, width=shadow_width)
+                draw.line((x, center_y - cap_half, x, center_y + cap_half), fill=white, width=line_width)
+            marker_index += 1
+    return panel
+
+
 def _build_label_map(image_size: tuple[int, int], lesion_specs: list[dict[str, Any]]) -> np.ndarray:
     width, height = image_size
     label_map = np.zeros((height, width), dtype=np.int32)
@@ -1048,6 +1115,8 @@ def _write_visuals(
     image_stem: str,
     requested: set[str],
     show_progress: bool = False,
+    pixels_per_cm: float = 1.0,
+    ruler_count: int = 0,
 ) -> tuple[dict[str, str], list[str]]:
     outputs: dict[str, str] = {}
     warnings_list: list[str] = []
@@ -1060,6 +1129,7 @@ def _write_visuals(
     overlay_panel = _build_heatmap_overlay_panel(image, label_map, volumes, lesion_specs, log_range, alpha=0.42)
     depth_heatmap = _depth_heatmap(depth_m)
     depth_panel = _fit_visual_panel(depth_heatmap)
+    depth_panel = _draw_visual_rulers(depth_panel, image.size, pixels_per_cm, ruler_count)
 
     frames: list[np.ndarray] = []
     frame_count = 72 if {"gif", "mov"} & requested else 1
