@@ -228,6 +228,7 @@ class LesionVolumePipeline:
                     output_root=visual_root,
                     image_stem=image_path.stem,
                     requested=requested_visuals,
+                    show_progress=show_progress,
                 )
                 outputs.update(visual_outputs)
                 warnings_list.extend(visual_warnings)
@@ -858,17 +859,108 @@ def _build_heatmap_overlay_panel(
 
 def _build_surface_style_panel(
     image: Image.Image,
+    depth_m: np.ndarray,
     depth_heatmap: Image.Image,
     label_map: np.ndarray,
     volumes: Mapping[int, float],
     lesion_specs: list[dict[str, Any]],
     log_range: tuple[float, float],
     alpha: float,
+    yaw_angle_rad: float = 0.0,
 ) -> Image.Image:
     depth_rgb = depth_heatmap.resize(image.size, Image.Resampling.BILINEAR)
     shaded = Image.blend(image.convert("RGB"), depth_rgb, 0.18)
     highlighted = _label_overlay(shaded, label_map, volumes, lesion_specs, log_range, alpha)
-    return _fit_visual_panel(highlighted)
+    return _render_depth_surface_panel(highlighted, depth_m, label_map, volumes, log_range, yaw_angle_rad)
+
+
+def _render_depth_surface_panel(
+    texture: Image.Image,
+    depth_m: np.ndarray,
+    label_map: np.ndarray,
+    volumes: Mapping[int, float],
+    log_range: tuple[float, float],
+    yaw_angle_rad: float,
+) -> Image.Image:
+    side = 112
+    panel = Image.new("RGB", (_PANEL_W, _PANEL_H), _VISUAL_BACKGROUND)
+    depth_grid = _resize_float_grid(depth_m, (side, side))
+    label_grid = np.asarray(
+        Image.fromarray(label_map.astype(np.int32), mode="I").resize((side, side), Image.Resampling.NEAREST),
+        dtype=np.int32,
+    )
+    colors = np.asarray(texture.convert("RGB").resize((side, side), Image.Resampling.BICUBIC), dtype=np.float32)
+
+    finite = np.isfinite(depth_grid)
+    if np.any(finite):
+        fill_value = float(np.nanmedian(depth_grid[finite]))
+    else:
+        fill_value = 0.0
+    depth_grid = np.nan_to_num(depth_grid.astype(np.float32), nan=fill_value, posinf=fill_value, neginf=fill_value)
+    centered = depth_grid - float(np.median(depth_grid))
+    scale = float(np.percentile(np.abs(centered), 95)) or 1.0
+    relief = np.clip(centered / scale, -1.0, 1.0) * 0.32
+
+    for label_id in np.unique(label_grid[label_grid > 0]):
+        relief[label_grid == label_id] += 0.06 * _volume_norm(volumes.get(int(label_id), 0.0), log_range)
+
+    image_w, image_h = texture.size
+    max_dim = max(image_w, image_h)
+    half_x = image_w / max_dim
+    half_y = image_h / max_dim
+    x_axis = np.linspace(-half_x, half_x, side, dtype=np.float32)
+    y_axis = np.linspace(-half_y, half_y, side, dtype=np.float32)
+    x_grid, y_grid = np.meshgrid(x_axis, y_axis)
+
+    cos_yaw = math.cos(float(yaw_angle_rad))
+    sin_yaw = math.sin(float(yaw_angle_rad))
+    x_rot = x_grid * cos_yaw + relief * sin_yaw
+    z_rot = -x_grid * sin_yaw + relief * cos_yaw
+
+    camera_distance = 3.1
+    perspective = camera_distance / np.maximum(camera_distance - z_rot, 0.25)
+    content_scale = min(
+        (_PANEL_W * 0.88) / max(2.0 * half_x, 1e-6),
+        (_PANEL_H * 0.78) / max(2.0 * half_y, 1e-6),
+    )
+    px = (_PANEL_W / 2.0) + x_rot * content_scale * perspective
+    py = (_PANEL_H / 2.0) + y_grid * content_scale * perspective
+
+    relief_norm = (relief - float(relief.min())) / max(float(relief.max() - relief.min()), 1e-6)
+    x_light = np.linspace(0.96, 1.05, side, dtype=np.float32)[None, :]
+    shade = np.clip((0.80 + 0.24 * relief_norm) * x_light, 0.66, 1.18)
+    shaded_colors = np.clip(colors * shade[..., None], 0, 255).astype(np.uint8)
+
+    z_faces = (
+        z_rot[:-1, :-1]
+        + z_rot[1:, :-1]
+        + z_rot[:-1, 1:]
+        + z_rot[1:, 1:]
+    ) * 0.25
+    draw = ImageDraw.Draw(panel)
+    order = np.argsort(z_faces.reshape(-1))
+    face_cols = side - 1
+    for flat_index in order:
+        row = int(flat_index // face_cols)
+        col = int(flat_index % face_cols)
+        polygon = (
+            (float(px[row, col]), float(py[row, col])),
+            (float(px[row, col + 1]), float(py[row, col + 1])),
+            (float(px[row + 1, col + 1]), float(py[row + 1, col + 1])),
+            (float(px[row + 1, col]), float(py[row + 1, col])),
+        )
+        rgb = np.mean(
+            shaded_colors[row: row + 2, col: col + 2].reshape(-1, 3),
+            axis=0,
+        )
+        draw.polygon(polygon, fill=tuple(int(value) for value in rgb))
+
+    return panel.filter(ImageFilter.SMOOTH_MORE)
+
+
+def _resize_float_grid(values: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    image = Image.fromarray(np.asarray(values, dtype=np.float32), mode="F")
+    return np.asarray(image.resize(size, Image.Resampling.BICUBIC), dtype=np.float32)
 
 
 def _build_volume_legend(height: int, log_range: tuple[float, float]) -> Image.Image:
@@ -955,6 +1047,7 @@ def _write_visuals(
     output_root: Path,
     image_stem: str,
     requested: set[str],
+    show_progress: bool = False,
 ) -> tuple[dict[str, str], list[str]]:
     outputs: dict[str, str] = {}
     warnings_list: list[str] = []
@@ -969,10 +1062,25 @@ def _write_visuals(
     depth_panel = _fit_visual_panel(depth_heatmap)
 
     frames: list[np.ndarray] = []
-    alphas = (0.42, 0.50, 0.58, 0.64, 0.58, 0.50, 0.42, 0.36) if {"gif", "mov"} & requested else (0.42,)
-    for alpha in alphas:
-        surface_panel = _build_surface_style_panel(image, depth_heatmap, label_map, volumes, lesion_specs, log_range, alpha=alpha)
-        frames.append(_compose_volume_frame(overlay_panel, depth_panel, surface_panel, legend, total_volume_cm3))
+    frame_count = 72 if {"gif", "mov"} & requested else 1
+    yaw_amplitude_rad = math.radians(18.0)
+    progress = _make_progress(show_progress and frame_count > 1, total=frame_count, desc="Render visual frames")
+    with progress as frame_bar:
+        for frame_index in range(frame_count):
+            yaw = yaw_amplitude_rad * math.sin(2.0 * math.pi * frame_index / frame_count)
+            surface_panel = _build_surface_style_panel(
+                image,
+                depth_m,
+                depth_heatmap,
+                label_map,
+                volumes,
+                lesion_specs,
+                log_range,
+                alpha=0.48,
+                yaw_angle_rad=yaw,
+            )
+            frames.append(_compose_volume_frame(overlay_panel, depth_panel, surface_panel, legend, total_volume_cm3))
+            frame_bar.update(1)
 
     if "png" in requested:
         png_path = output_root / f"{image_stem}_lesion_volume.png"
@@ -986,13 +1094,13 @@ def _write_visuals(
 
     if "gif" in requested:
         gif_path = output_root / f"{image_stem}_lesion_volume.gif"
-        _write_animation(gif_path, frames, fps=6)
+        _write_animation(gif_path, frames, fps=24)
         outputs["gif"] = str(gif_path)
 
     if "mov" in requested:
         mov_path = output_root / f"{image_stem}_lesion_volume.mov"
         try:
-            _write_animation(mov_path, frames, fps=6)
+            _write_animation(mov_path, frames, fps=24)
             outputs["mov"] = str(mov_path)
         except Exception as exc:  # pragma: no cover - depends on local video encoders.
             warnings_list.append(f"Could not write MOV because no usable video writer was available: {exc}")
