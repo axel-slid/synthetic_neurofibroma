@@ -31,11 +31,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--visual",
         action="append",
-        choices=["gif", "montage", "mov"],
+        choices=["gif", "png", "mov", "montage"],
         default=[],
-        help="Write an optional visual output. Repeat the flag for multiple outputs.",
+        help="Write an optional visual output. Repeat the flag for multiple outputs. 'montage' is a legacy PNG alias.",
     )
-    parser.add_argument("--all-visuals", action="store_true", help="Write GIF, montage, and MOV outputs.")
+    parser.add_argument("--all-visuals", action="store_true", help="Write GIF, PNG, and MOV outputs.")
     parser.add_argument("--model-id", default="apple/DepthPro-hf", help="Hugging Face Depth Pro model id.")
     parser.add_argument("--device", default="auto", help="Depth Pro device: auto, cpu, cuda, cuda:0, etc.")
     parser.add_argument(
@@ -64,7 +64,7 @@ def main(argv: list[str] | None = None) -> int:
 
     visuals = set(args.visual)
     if args.all_visuals:
-        visuals = {"gif", "montage", "mov"}
+        visuals = {"gif", "png", "mov"}
 
     pipeline = LesionVolumePipeline(
         model_id=args.model_id,

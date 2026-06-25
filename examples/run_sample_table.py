@@ -10,12 +10,12 @@ SAMPLE_DIR = ROOT / "sample_data" / "lesion_volume_sample"
 
 
 def main() -> None:
-    results = LesionVolumePipeline().compute_from_table(
+    results = LesionVolumePipeline().compute_from_csv(
         annotations_csv=SAMPLE_DIR / "sample_annotations.csv",
         image_root=SAMPLE_DIR,
         output_dir=ROOT / "outputs" / "sample_table",
         generate_visuals=True,
-        visuals={"gif", "montage"},
+        visuals={"gif", "png", "mov"},
     )
     for result in results:
         print(f"{Path(result.image_path).name}: {result.total_volume_cm3:.4f} cm^3")

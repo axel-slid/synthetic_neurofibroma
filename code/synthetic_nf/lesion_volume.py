@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
 
 Point = tuple[float, float]
@@ -86,9 +86,9 @@ class LesionVolumePipeline:
                 with ``center`` and optional ``radius_px``.
             scale_points: Two image coordinates that mark exactly 1 cm.
             output_dir: Directory for tables, arrays, masks, and visuals.
-            generate_visuals: If true, write default GIF and montage outputs.
-            visuals: Optional iterable containing any of ``gif``, ``montage``,
-                and ``mov``.
+            generate_visuals: If true, write default GIF, PNG, and MOV outputs.
+            visuals: Optional iterable containing any of ``gif``, ``png``,
+                ``mov``, and the legacy ``montage`` alias.
             point_radius_px: Fallback disk radius when only a lesion center is
                 provided.
             ring_width_px: Background ring width around each lesion. By default
@@ -115,9 +115,9 @@ class LesionVolumePipeline:
 
         requested_visuals = set(visuals or [])
         if generate_visuals and not requested_visuals:
-            requested_visuals = {"gif", "montage"}
+            requested_visuals = {"gif", "png", "mov"}
         requested_visuals = {item.lower() for item in requested_visuals}
-        unknown_visuals = requested_visuals - {"gif", "montage", "mov"}
+        unknown_visuals = requested_visuals - {"gif", "png", "montage", "mov"}
         if unknown_visuals:
             raise ValueError(f"Unknown visual output(s): {sorted(unknown_visuals)}")
 
@@ -223,9 +223,8 @@ class LesionVolumePipeline:
                 visual_outputs, visual_warnings = _write_visuals(
                     image=image,
                     depth_m=depth_m,
-                    union_mask=union_mask,
+                    lesion_rows=lesion_rows,
                     lesion_specs=lesion_specs,
-                    scale_points=scale_pair,
                     output_root=visual_root,
                     image_stem=image_path.stem,
                     requested=requested_visuals,
@@ -354,6 +353,28 @@ class LesionVolumePipeline:
                 )
             )
         return results
+
+    def compute_from_csv(
+        self,
+        annotations_csv: str | Path,
+        output_dir: str | Path | None = None,
+        image_root: str | Path | None = None,
+        generate_visuals: bool = False,
+        visuals: Iterable[str] | None = None,
+        show_progress: bool = True,
+        **compute_kwargs: Any,
+    ) -> list[LesionVolumeResult]:
+        """Compute volumes from the expected one-row-per-lesion CSV schema."""
+
+        return self.compute_from_table(
+            annotations_csv=annotations_csv,
+            output_dir=output_dir,
+            image_root=image_root,
+            generate_visuals=generate_visuals,
+            visuals=visuals,
+            show_progress=show_progress,
+            **compute_kwargs,
+        )
 
     def _predict_depth_m(self, image: Image.Image) -> np.ndarray:
         self._ensure_depthpro_dependencies()
@@ -651,84 +672,373 @@ def _depth_visual(depth_m: np.ndarray) -> Image.Image:
     return Image.fromarray(norm, mode="L").convert("RGB")
 
 
+_VISUAL_BACKGROUND = (245, 247, 250)
+_VISUAL_TEXT = (28, 34, 42)
+_PANEL_W = 340
+_PANEL_H = 300
+_PANEL_GAP = 12
+_CAPTION_H = 34
+_LEGEND_GAP = 20
+_LEGEND_W = 168
+_CM3_LABEL = "cm\u00b3"
+_VIRIDIS_STOPS = (
+    (0.00, (68, 1, 84)),
+    (0.25, (59, 82, 139)),
+    (0.50, (33, 145, 140)),
+    (0.75, (94, 201, 98)),
+    (1.00, (253, 231, 37)),
+)
+_MAGMA_STOPS = (
+    (0.00, (0, 0, 4)),
+    (0.25, (72, 16, 110)),
+    (0.50, (183, 55, 121)),
+    (0.75, (251, 135, 97)),
+    (1.00, (252, 253, 191)),
+)
+
+
+def _load_font(size: int, bold: bool = False) -> ImageFont.ImageFont:
+    candidates = [
+        "/usr/share/fonts/truetype/lato/Lato-Heavy.ttf" if bold else "/usr/share/fonts/truetype/lato/Lato-Medium.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    ]
+    for candidate in candidates:
+        path = Path(candidate)
+        if path.exists():
+            return ImageFont.truetype(str(path), size=size)
+    return ImageFont.load_default()
+
+
+def _interpolate_color(value: float, stops: Sequence[tuple[float, tuple[int, int, int]]]) -> tuple[int, int, int]:
+    value = float(np.clip(value, 0.0, 1.0))
+    for index in range(1, len(stops)):
+        left_t, left_rgb = stops[index - 1]
+        right_t, right_rgb = stops[index]
+        if value <= right_t:
+            frac = (value - left_t) / max(right_t - left_t, 1e-12)
+            return tuple(
+                int(round(left_rgb[channel] + frac * (right_rgb[channel] - left_rgb[channel])))
+                for channel in range(3)
+            )
+    return stops[-1][1]
+
+
+def _volume_color(norm: float) -> tuple[int, int, int]:
+    return _interpolate_color(norm, _VIRIDIS_STOPS)
+
+
+def _apply_colormap(norm: np.ndarray, stops: Sequence[tuple[float, tuple[int, int, int]]]) -> np.ndarray:
+    clipped = np.clip(norm.astype(np.float32), 0.0, 1.0)
+    colors = np.zeros((*clipped.shape, 3), dtype=np.float32)
+    for index in range(1, len(stops)):
+        left_t, left_rgb = stops[index - 1]
+        right_t, right_rgb = stops[index]
+        mask = (clipped >= left_t) & (clipped <= right_t if index == len(stops) - 1 else clipped < right_t)
+        if not np.any(mask):
+            continue
+        frac = (clipped[mask] - left_t) / max(right_t - left_t, 1e-12)
+        left_arr = np.asarray(left_rgb, dtype=np.float32)
+        right_arr = np.asarray(right_rgb, dtype=np.float32)
+        colors[mask] = left_arr + frac[:, None] * (right_arr - left_arr)
+    return np.clip(np.round(colors), 0, 255).astype(np.uint8)
+
+
+def _depth_heatmap(depth_m: np.ndarray) -> Image.Image:
+    finite = np.isfinite(depth_m)
+    norm = np.zeros(depth_m.shape, dtype=np.float32)
+    if np.any(finite):
+        low, high = np.percentile(depth_m[finite], [2, 98])
+        if high <= low:
+            high = low + 1e-6
+        norm[finite] = np.clip((depth_m[finite] - low) / (high - low), 0.0, 1.0)
+    rgb = _apply_colormap(norm, _MAGMA_STOPS)
+    return Image.fromarray(rgb, mode="RGB").filter(ImageFilter.GaussianBlur(radius=1.1))
+
+
+def _fit_visual_panel(image: Image.Image) -> Image.Image:
+    panel = Image.new("RGB", (_PANEL_W, _PANEL_H), _VISUAL_BACKGROUND)
+    contained = ImageOps.contain(image.convert("RGB"), (_PANEL_W, _PANEL_H), Image.Resampling.LANCZOS)
+    panel.paste(contained, ((_PANEL_W - contained.width) // 2, (_PANEL_H - contained.height) // 2))
+    return panel
+
+
+def _build_label_map(image_size: tuple[int, int], lesion_specs: list[dict[str, Any]]) -> np.ndarray:
+    width, height = image_size
+    label_map = np.zeros((height, width), dtype=np.int32)
+    for index, spec in enumerate(lesion_specs, start=1):
+        mask = _mask_from_spec(spec, width, height)
+        open_pixels = mask & (label_map == 0)
+        label_map[open_pixels] = index
+        if not np.any(open_pixels) and np.any(mask):
+            label_map[mask] = index
+    return label_map
+
+
+def _volume_log_range(volumes: Mapping[int, float]) -> tuple[float, float]:
+    max_volume = max([float(value) for value in volumes.values() if float(value) > 0.0], default=1.0)
+    high = math.log1p(max(max_volume, 1e-9))
+    return 0.0, high if high > 0.0 else 1.0
+
+
+def _volume_norm(volume: float, log_range: tuple[float, float]) -> float:
+    low, high = log_range
+    if high <= low:
+        return 0.0
+    return float(np.clip((math.log1p(max(float(volume), 0.0)) - low) / (high - low), 0.0, 1.0))
+
+
+def _format_volume(value: float) -> str:
+    value = max(0.0, float(value))
+    if value >= 100:
+        return f"{value:.0f}"
+    if value >= 10:
+        return f"{value:.1f}"
+    if value >= 1:
+        return f"{value:.2f}".rstrip("0").rstrip(".")
+    if value >= 0.01:
+        return f"{value:.2g}"
+    if value > 0:
+        return f"{value:.1e}".replace("e-0", "e-").replace("e+0", "e+")
+    return "0"
+
+
+def _label_overlay(
+    image: Image.Image,
+    label_map: np.ndarray,
+    volumes: Mapping[int, float],
+    lesion_specs: list[dict[str, Any]],
+    log_range: tuple[float, float],
+    alpha: float,
+) -> Image.Image:
+    base = image.convert("RGBA")
+    if label_map.size:
+        max_label = int(label_map.max())
+    else:
+        max_label = 0
+    lut = np.zeros((max_label + 1, 4), dtype=np.uint8)
+    for label_id in range(1, max_label + 1):
+        color = _volume_color(_volume_norm(volumes.get(label_id, 0.0), log_range))
+        lut[label_id, :3] = color
+        lut[label_id, 3] = int(round(255 * np.clip(alpha, 0.0, 1.0)))
+    overlay = Image.fromarray(lut[label_map], mode="RGBA") if max_label else Image.new("RGBA", image.size, (0, 0, 0, 0))
+    combined = Image.alpha_composite(base, overlay)
+    draw = ImageDraw.Draw(combined, "RGBA")
+    outline_width = max(2, int(round(min(image.size) / 220)))
+    for index, spec in enumerate(lesion_specs, start=1):
+        color = _volume_color(_volume_norm(volumes.get(index, 0.0), log_range))
+        outline = (*color, 235)
+        shadow = (30, 20, 36, 150)
+        if spec["kind"] == "polygon":
+            points = [(float(x), float(y)) for x, y in spec["polygon"]]
+            if len(points) >= 2:
+                closed = points + [points[0]]
+                draw.line(closed, fill=shadow, width=outline_width + 2, joint="curve")
+                draw.line(closed, fill=outline, width=outline_width, joint="curve")
+        elif spec["kind"] == "center":
+            x, y = spec["center"]
+            radius = float(spec["radius_px"])
+            box = (x - radius, y - radius, x + radius, y + radius)
+            draw.ellipse(box, outline=shadow, width=outline_width + 2)
+            draw.ellipse(box, outline=outline, width=outline_width)
+    return combined.convert("RGB")
+
+
+def _build_heatmap_overlay_panel(
+    image: Image.Image,
+    label_map: np.ndarray,
+    volumes: Mapping[int, float],
+    lesion_specs: list[dict[str, Any]],
+    log_range: tuple[float, float],
+    alpha: float,
+) -> Image.Image:
+    return _fit_visual_panel(_label_overlay(image, label_map, volumes, lesion_specs, log_range, alpha))
+
+
+def _build_surface_style_panel(
+    image: Image.Image,
+    depth_heatmap: Image.Image,
+    label_map: np.ndarray,
+    volumes: Mapping[int, float],
+    lesion_specs: list[dict[str, Any]],
+    log_range: tuple[float, float],
+    alpha: float,
+) -> Image.Image:
+    depth_rgb = depth_heatmap.resize(image.size, Image.Resampling.BILINEAR)
+    shaded = Image.blend(image.convert("RGB"), depth_rgb, 0.18)
+    highlighted = _label_overlay(shaded, label_map, volumes, lesion_specs, log_range, alpha)
+    return _fit_visual_panel(highlighted)
+
+
+def _build_volume_legend(height: int, log_range: tuple[float, float]) -> Image.Image:
+    legend = Image.new("RGB", (_LEGEND_W, height), _VISUAL_BACKGROUND)
+    draw = ImageDraw.Draw(legend)
+    title_font = _load_font(25, bold=True)
+    label = f"lesion volume ({_CM3_LABEL})"
+    label_box = draw.textbbox((0, 0), label, font=title_font)
+    label_image = Image.new(
+        "RGBA",
+        (label_box[2] - label_box[0] + 8, label_box[3] - label_box[1] + 8),
+        (0, 0, 0, 0),
+    )
+    label_draw = ImageDraw.Draw(label_image)
+    label_draw.text((4 - label_box[0], 4 - label_box[1]), label, fill=(*_VISUAL_TEXT, 255), font=title_font)
+    label_rotated = label_image.rotate(90, expand=True)
+
+    bar_h = min(max(210, int(height * 0.48)), max(130, height - 118))
+    bar_y0 = (height - bar_h) // 2
+    bar_y1 = bar_y0 + bar_h
+    bar_x0 = 62
+    bar_x1 = 94
+    legend.paste(label_rotated.convert("RGB"), (12, bar_y0 + (bar_h - label_rotated.height) // 2), label_rotated)
+
+    for y in range(bar_y0, bar_y1):
+        t = 1.0 - (y - bar_y0) / max(1, bar_y1 - bar_y0 - 1)
+        draw.line((bar_x0, y, bar_x1, y), fill=_volume_color(t))
+    draw.rectangle((bar_x0 - 1, bar_y0 - 1, bar_x1 + 1, bar_y1 + 1), outline=(60, 66, 74), width=2)
+
+    log_min, log_max = log_range
+    tick_labels = [
+        (t, _format_volume(math.expm1(log_min + t * (log_max - log_min))))
+        for t in (1.0, 0.5, 0.0)
+    ]
+    tick_size = 18
+    tick_x = bar_x1 + 17
+    while tick_size > 11:
+        tick_font = _load_font(tick_size, bold=True)
+        if all(draw.textbbox((0, 0), text, font=tick_font)[2] <= _LEGEND_W - tick_x - 2 for _, text in tick_labels):
+            break
+        tick_size -= 1
+    tick_font = _load_font(tick_size, bold=True)
+
+    for t, label_text in tick_labels:
+        y = int(round(bar_y1 - t * (bar_y1 - bar_y0)))
+        draw.line((bar_x1 + 3, y, bar_x1 + 13, y), fill=_VISUAL_TEXT, width=2)
+        draw.text((tick_x, y - 10), label_text, fill=_VISUAL_TEXT, font=tick_font)
+    return legend
+
+
+def _draw_caption(frame: Image.Image, text: str, center_x: int, top_y: int) -> None:
+    draw = ImageDraw.Draw(frame)
+    font = _load_font(20, bold=True)
+    box = draw.textbbox((0, 0), text, font=font)
+    width = box[2] - box[0]
+    height = box[3] - box[1]
+    draw.text((center_x - width // 2, top_y + (_CAPTION_H - height) // 2 - box[1]), text, fill=_VISUAL_TEXT, font=font)
+
+
+def _compose_volume_frame(
+    overlay_panel: Image.Image,
+    depth_panel: Image.Image,
+    surface_panel: Image.Image,
+    legend: Image.Image,
+    total_volume_cm3: float,
+) -> np.ndarray:
+    row_width = _PANEL_W * 3 + _PANEL_GAP * 2
+    width = row_width + _LEGEND_GAP + _LEGEND_W
+    height = _PANEL_H + _CAPTION_H
+    frame = Image.new("RGB", (width, height), _VISUAL_BACKGROUND)
+    for index, panel in enumerate((overlay_panel, depth_panel, surface_panel)):
+        frame.paste(panel, (index * (_PANEL_W + _PANEL_GAP), 0))
+    frame.paste(legend, (row_width + _LEGEND_GAP, 0))
+    surface_cx = 2 * (_PANEL_W + _PANEL_GAP) + _PANEL_W // 2
+    _draw_caption(frame, f"total lesion volume: {_format_volume(total_volume_cm3)} {_CM3_LABEL}", surface_cx, _PANEL_H)
+    return np.asarray(frame, dtype=np.uint8)
+
+
 def _write_visuals(
     image: Image.Image,
     depth_m: np.ndarray,
-    union_mask: np.ndarray,
+    lesion_rows: list[dict[str, Any]],
     lesion_specs: list[dict[str, Any]],
-    scale_points: ScalePoints,
     output_root: Path,
     image_stem: str,
     requested: set[str],
 ) -> tuple[dict[str, str], list[str]]:
     outputs: dict[str, str] = {}
     warnings_list: list[str] = []
-    overlay = _overlay_image(image, union_mask, lesion_specs, scale_points, alpha=0.45)
-    depth_vis = _depth_visual(depth_m)
+
+    label_map = _build_label_map(image.size, lesion_specs)
+    volumes = {index: float(row.get("volume_cm3", 0.0)) for index, row in enumerate(lesion_rows, start=1)}
+    total_volume_cm3 = float(sum(volumes.values()))
+    log_range = _volume_log_range(volumes)
+    legend = _build_volume_legend(_PANEL_H + _CAPTION_H, log_range)
+    overlay_panel = _build_heatmap_overlay_panel(image, label_map, volumes, lesion_specs, log_range, alpha=0.42)
+    depth_heatmap = _depth_heatmap(depth_m)
+    depth_panel = _fit_visual_panel(depth_heatmap)
+
+    frames: list[np.ndarray] = []
+    alphas = (0.42, 0.50, 0.58, 0.64, 0.58, 0.50, 0.42, 0.36) if {"gif", "mov"} & requested else (0.42,)
+    for alpha in alphas:
+        surface_panel = _build_surface_style_panel(image, depth_heatmap, label_map, volumes, lesion_specs, log_range, alpha=alpha)
+        frames.append(_compose_volume_frame(overlay_panel, depth_panel, surface_panel, legend, total_volume_cm3))
+
+    if "png" in requested:
+        png_path = output_root / f"{image_stem}_lesion_volume.png"
+        Image.fromarray(frames[0], mode="RGB").save(png_path, compress_level=1)
+        outputs["png"] = str(png_path)
 
     if "montage" in requested:
         montage_path = output_root / f"{image_stem}_lesion_volume_montage.png"
-        montage = Image.new("RGB", (image.width * 3, image.height), "white")
-        montage.paste(image, (0, 0))
-        montage.paste(depth_vis, (image.width, 0))
-        montage.paste(overlay, (image.width * 2, 0))
-        montage.save(montage_path)
+        Image.fromarray(frames[0], mode="RGB").save(montage_path, compress_level=1)
         outputs["montage_png"] = str(montage_path)
 
-    if "gif" in requested or "mov" in requested:
-        frames = []
-        for alpha in [0.18, 0.3, 0.45, 0.62, 0.45, 0.3]:
-            frames.append(np.asarray(_overlay_image(image, union_mask, lesion_specs, scale_points, alpha=alpha)))
-        if "gif" in requested:
-            gif_path = output_root / f"{image_stem}_lesion_volume.gif"
-            _write_animation(gif_path, frames, fps=6)
-            outputs["gif"] = str(gif_path)
-        if "mov" in requested:
-            mov_path = output_root / f"{image_stem}_lesion_volume.mov"
-            try:
-                _write_animation(mov_path, frames, fps=6)
-                outputs["mov"] = str(mov_path)
-            except Exception as exc:  # pragma: no cover - depends on ffmpeg availability.
-                warnings_list.append(f"Could not write MOV because ffmpeg/imageio failed: {exc}")
+    if "gif" in requested:
+        gif_path = output_root / f"{image_stem}_lesion_volume.gif"
+        _write_animation(gif_path, frames, fps=6)
+        outputs["gif"] = str(gif_path)
+
+    if "mov" in requested:
+        mov_path = output_root / f"{image_stem}_lesion_volume.mov"
+        try:
+            _write_animation(mov_path, frames, fps=6)
+            outputs["mov"] = str(mov_path)
+        except Exception as exc:  # pragma: no cover - depends on local video encoders.
+            warnings_list.append(f"Could not write MOV because no usable video writer was available: {exc}")
 
     return outputs, warnings_list
 
 
-def _overlay_image(
-    image: Image.Image,
-    union_mask: np.ndarray,
-    lesion_specs: list[dict[str, Any]],
-    scale_points: ScalePoints,
-    alpha: float,
-) -> Image.Image:
-    base = image.convert("RGBA")
-    tint = Image.new("RGBA", image.size, (0, 0, 0, 0))
-    tint_arr = np.zeros((image.height, image.width, 4), dtype=np.uint8)
-    tint_arr[union_mask] = (226, 48, 48, int(255 * alpha))
-    tint = Image.fromarray(tint_arr, mode="RGBA")
-    combined = Image.alpha_composite(base, tint)
-    draw = ImageDraw.Draw(combined)
-    for spec in lesion_specs:
-        if spec["kind"] == "polygon":
-            points = list(spec["polygon"])
-            if points:
-                draw.line(points + [points[0]], fill=(255, 0, 0, 255), width=3)
-        elif spec["kind"] == "center":
-            x, y = spec["center"]
-            radius = float(spec["radius_px"])
-            draw.ellipse((x - radius, y - radius, x + radius, y + radius), outline=(255, 0, 0, 255), width=3)
-    (x1, y1), (x2, y2) = scale_points
-    draw.line((x1, y1, x2, y2), fill=(20, 20, 20, 255), width=4)
-    draw.ellipse((x1 - 4, y1 - 4, x1 + 4, y1 + 4), fill=(20, 20, 20, 255))
-    draw.ellipse((x2 - 4, y2 - 4, x2 + 4, y2 + 4), fill=(20, 20, 20, 255))
-    return combined.convert("RGB")
-
-
 def _write_animation(path: Path, frames: list[np.ndarray], fps: int) -> None:
+    suffix = path.suffix.lower()
+    if suffix == ".mov":
+        _write_mov(path, frames, fps)
+        return
+
     try:
         import imageio.v2 as imageio
     except ImportError as exc:
-        raise RuntimeError("imageio is required for GIF/MOV visual outputs.") from exc
+        raise RuntimeError("imageio is required for GIF visual outputs.") from exc
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        imageio.mimsave(path, frames, fps=fps)
+
+
+def _write_mov(path: Path, frames: list[np.ndarray], fps: int) -> None:
+    if not frames:
+        raise ValueError("No frames to write.")
+    try:
+        import cv2
+
+        height, width = frames[0].shape[:2]
+        writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), float(fps), (width, height))
+        if writer.isOpened():
+            try:
+                for frame in frames:
+                    writer.write(cv2.cvtColor(np.ascontiguousarray(frame), cv2.COLOR_RGB2BGR))
+            finally:
+                writer.release()
+            if path.exists() and path.stat().st_size > 0:
+                return
+        writer.release()
+    except Exception:
+        pass
+
+    try:
+        import imageio.v2 as imageio
+    except ImportError as exc:
+        raise RuntimeError("MOV output requires opencv-python or imageio with an ffmpeg backend.") from exc
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         imageio.mimsave(path, frames, fps=fps)
